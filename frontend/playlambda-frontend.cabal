@@ -31,5 +31,8 @@ executable playlambda-frontend
                     , reflex-dom
                     , playlambda-lib
                     , lens
+                    , text
+                    , MonadRandom
+                    , random
   hs-source-dirs:      app
   default-language:    Haskell2010
