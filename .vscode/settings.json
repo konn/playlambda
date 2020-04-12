@@ -1,3 +1,3 @@
 {
-  "languageServerHaskell.hieExecutablePath": "${workspaceFolder}/haskell-language-server.sh"
+  "languageServerHaskell.hieExecutablePath": "${workspaceFolder}/scripts/haskell-language-server.sh"
 }
