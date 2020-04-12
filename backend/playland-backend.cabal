@@ -28,5 +28,5 @@ executable playland-backend
   -- other-extensions:
   build-depends:       base ^>=4.12.0.0
                     ,  playland-lib
-hs-source-dirs:      app
+  hs-source-dirs:      app
   default-language:    Haskell2010
