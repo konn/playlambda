@@ -1,10 +1,10 @@
 cradle:
   cabal:
     - path: "./lib/src"
-      component: "playland-lib:lib"
+      component: "playlambda-lib:lib"
 
     - path: "./frontend/app"
-      component: "playland-frontend:exe:playland-frontend"
+      component: "playlambda-frontend:exe:playlambda-frontend"
 
     - path: "./backend/app"
-      component: "playland-frontend:exe:playland-backend"
+      component: "playlambda-frontend:exe:playlambda-backend"

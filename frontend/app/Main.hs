@@ -1,4 +1,9 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Main where
+import Control.Lens
+import Reflex
+import Reflex.Dom
 
 main :: IO ()
-main = putStrLn "Hello, Haskell!"
+main = mainWidget $ el "div" $ do
+  el "h1" $ text "playlambda"

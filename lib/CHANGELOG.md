@@ -1,4 +1,4 @@
-# Revision history for playland-lib
+# Revision history for playlambda-lib
 
 ## 0.0.0.0 -- YYYY-mm-dd
 

@@ -3,13 +3,13 @@
   useWarp = true;
 
   packages = {
-    playland-lib = ./lib;
-    playland-backend = ./backend;
-    playland-frontend = ./frontend;
+    playlambda-lib = ./lib;
+    playlambda-backend = ./backend;
+    playlambda-frontend = ./frontend;
   };
 
   shells = {
-    ghc = ["playland-lib" "playland-backend" "playland-frontend"];
-    ghcjs = ["playland-lib" "playland-frontend"];
+    ghc = ["playlambda-lib" "playlambda-backend" "playlambda-frontend"];
+    ghcjs = ["playlambda-lib" "playlambda-frontend"];
   };
 })
