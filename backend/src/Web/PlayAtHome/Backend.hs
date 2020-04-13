@@ -1,19 +1,21 @@
-{-# LANGUAGE LambdaCase, OverloadedStrings, RecordWildCards #-}
-{-# LANGUAGE TypeApplications                               #-}
+{-# LANGUAGE GADTs, LambdaCase, OverloadedStrings, RecordWildCards #-}
+{-# LANGUAGE TypeApplications                                      #-}
 module Web.PlayAtHome.Backend where
-import           Common.Route
 import           Control.Concurrent.STM
 import           Control.Exception
 import           Control.Lens
 import           Control.Monad
 import           Data.Aeson
-import qualified Data.HashMap.Strict         as HM
-import qualified Data.HashSet                as HS
+import           Data.Dependent.Sum           (DSum (..))
+import qualified Data.HashMap.Strict          as HM
+import qualified Data.HashSet                 as HS
 import           Data.Time
-import qualified Data.UUID.V4                as UUID
-import qualified Network.WebSockets          as WS
+import qualified Data.UUID.V4                 as UUID
+import qualified Network.WebSockets           as WS
+import           Network.WebSockets.Snap
 import           Obelisk.Backend
-import           Web.PlayAtHome.Server.Types
+import           Web.PlayAtHome.Backend.Types
+import           Web.PlayAtHome.Route
 import           Web.PlayAtHome.Types
 
 application :: TVar ServerState -> WS.ServerApp
@@ -158,8 +160,8 @@ backend = Backend
   { _backend_run = \serve -> do
       state <- newTVarIO initServerState
       serve $ \case
-        BackendRoute_Missing :=> Identity () -> return
-        BackendRoute_WebSocketChat :=> Identity () ->
+        BackendRoute_Missing :=> Identity () -> return ()
+        BackendRoute_Room :=> Identity () ->
           runWebSocketsSnap (application state)
-  , _backend_routeEncoder = backendRouteEncoder
+  , _backend_routeEncoder = fullRouteEncoder
   }

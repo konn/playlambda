@@ -1,24 +1,31 @@
-{-# LANGUAGE DataKinds, OverloadedStrings, TypeApplications #-}
-
+{-# LANGUAGE DataKinds, FlexibleContexts, OverloadedStrings #-}
+{-# LANGUAGE TypeApplications                               #-}
 module Web.PlayAtHome.Frontend where
 
+import           Control.Lens
 import           Control.Monad
+import           Control.Monad.IO.Class
+import           Data.Text                   (Text, pack)
 import qualified Data.Text                   as T
 import qualified Data.Text.Encoding          as T
 import           Language.Javascript.JSaddle (eval, liftJSM)
+import           Reflex
+import           Reflex.Dom.Core
+import           System.Random
 
 import Obelisk.Configs
 import Obelisk.Frontend
 import Obelisk.Generated.Static
 import Obelisk.Route
 
-import Reflex.Dom.Core
-
-import Common.Api
-import Common.Route
+import Web.PlayAtHome.Route
+import Web.PlayAtHome.Types
 
 diceRoller
-  :: (MonadIO (PushM t), MonadHold t m, PostBuild t m, DomBuilder t m)
+  :: (MonadIO (Performable m),
+      MonadHold t m, PostBuild t m,
+      PerformEvent t m,
+      DomBuilder t m)
   => m ()
 diceRoller = el "div" $ do
   btn <- constButtonM
@@ -29,11 +36,11 @@ diceRoller = el "div" $ do
   pure ()
 
 constButtonM
-  :: DomBuilder t m
-  => Text -> PushM t a -> m (Event t a)
+  :: (DomBuilder t m, PerformEvent t m)
+  => Text -> Performable m a -> m (Event t a)
 constButtonM tag act = do
   (e, _) <- elAttr' "button" ("type" =: "button") $ text tag
-  return $ pushAlways (const act) (domEvent Click e)
+  performEvent $ pushAlways (const $ pure act) (domEvent Click e)
 
 
 
@@ -47,7 +54,6 @@ frontend = Frontend
       elAttr "link" ("href" =: static @"main.css" <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
   , _frontend_body = do
       el "h1" $ text "Pλay At Home"
-      el "p" $ text $ T.pack commonStuff
 
       -- `prerender` and `prerender_` let you choose a widget to run on the server
       -- during prerendering and a different widget to run on the client with

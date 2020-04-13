@@ -11,7 +11,7 @@ maintainer:          konn.jinro@gmail.com
 -- copyright:
 category:            Web
 extra-source-files:  CHANGELOG.md
-cabal-version: >= 1.2
+cabal-version: >= 1.10
 build-type: Simple
 
 source-repository head
@@ -23,10 +23,9 @@ library
   if impl(ghcjs)
     buildable: False
   exposed-modules: 
-    Web.PlayAtHome.Server.Types
-    Web.PlayAtHome.Server
+    Web.PlayAtHome.Backend.Types
+    Web.PlayAtHome.Backend
   hs-source-dirs:      src
-
   -- other-modules:
   ghc-options: -Wall
   -- other-extensions:
@@ -37,6 +36,8 @@ library
                     , aeson
                     , unordered-containers
                     , stm
+                    , websockets-snap
+                    , dependent-sum
                     , pwstore-fast
                     , lens
                     , uuid
@@ -52,6 +53,7 @@ library
 executable backend
   main-is: main.hs
   hs-source-dirs: src-bin
+  default-language: Haskell2010
   if impl(ghcjs)
     buildable: False
   build-depends: base
