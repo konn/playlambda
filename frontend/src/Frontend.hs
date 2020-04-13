@@ -1,0 +1,3 @@
+-- | WTH, ob run script hard-codes module name for back/frontend...
+module Frontend (module Web.PlayAtHome.Frontend) where
+import Web.PlayAtHome.Frontend
