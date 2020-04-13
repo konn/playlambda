@@ -4,7 +4,7 @@ synopsis:            Play your own/favourite games with your friends, while stya
 -- description:
 homepage:            https://github.com/konn/playlambda
 -- bug-reports:
-license:             BSD-3-Clause
+license:             BSD3
 license-file:        LICENSE
 author:              Hiromi ISHII
 maintainer:          konn.jinro@gmail.com
@@ -44,7 +44,7 @@ executable frontend
                 , frontend
                 , reflex
                 , reflex-dom
-                , playlambda-lib
+                , common
                 , lens
                 , text
                 , random
