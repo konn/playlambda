@@ -1,4 +1,2 @@
-packages:
-  lib/
-  frontend/
-  backend/
+optional-packages:
+  *

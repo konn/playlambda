@@ -1,0 +1,23 @@
+name: common
+version: 0.1
+cabal-version: >= 1.2
+build-type: Simple
+
+library
+  hs-source-dirs: src
+  build-depends:  base
+                , containers
+                , unordered-containers
+                , text
+                , hashable
+                , uuid
+                , vector
+                , bytestring
+                , pwstore-fast
+                , aeson
+                , vector-instances
+                , time
+                , lens
+  exposed-modules:
+    Web.PlayAtHome.Types
+    Web.PlayAtHomeCommon.Route
