@@ -18,6 +18,7 @@ library
                 , vector-instances
                 , time
                 , lens
+                , obelisk-route
   exposed-modules:
     Web.PlayAtHome.Types
     Web.PlayAtHome.Route
