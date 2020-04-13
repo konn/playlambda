@@ -1,4 +1,4 @@
-name:                frontend
+name:                backend
 version:             0.0.0.0
 synopsis:            Play your own/favourite games with your friends, while styaing at home
 -- description:
@@ -11,6 +11,8 @@ maintainer:          konn.jinro@gmail.com
 -- copyright:
 category:            Web
 extra-source-files:  CHANGELOG.md
+cabal-version: >= 1.2
+build-type: Simple
 
 source-repository head
   type:     git
@@ -28,7 +30,7 @@ library
   -- other-modules:
   ghc-options: -Wall
   -- other-extensions:
-  build-depends:      base ^>=4.12.0.0
+  build-depends:      base >=4.12.0.0
                     , common
                     , websockets
                     , time

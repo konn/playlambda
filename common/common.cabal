@@ -20,4 +20,4 @@ library
                 , lens
   exposed-modules:
     Web.PlayAtHome.Types
-    Web.PlayAtHomeCommon.Route
+    Web.PlayAtHome.Route

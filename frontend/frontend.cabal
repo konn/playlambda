@@ -11,6 +11,8 @@ maintainer:          konn.jinro@gmail.com
 -- copyright:
 category:            Web
 extra-source-files:  CHANGELOG.md
+cabal-version: >= 1.2
+build-type: Simple
 
 source-repository head
   type:     git
