@@ -149,13 +149,13 @@ roomWidget evt0 rinfo = el "div" $ do
     el "h3" $ text "Memebrs"
     el "ul" $ simpleList (Set.toList <$> mems) $ \dynUid ->
       el "li" $ dynText (runUserId <$> dynUid)
+  dice <- diceRoller
   void $ elAttr "div" ("id" =: "log") $ do
     el "h3" $ text "ログ"
     elAttr "ul" ("id" =: "log-body") $
       simpleList logs $ \msg ->
         elDynAttr "li" (msgClass <$> msg) $
         dynText $ renderMsg <$> msg
-  dice <- diceRoller
   pure $ leftmost
     [DiceRoll (roomId rinfo) <$> dice]
 
