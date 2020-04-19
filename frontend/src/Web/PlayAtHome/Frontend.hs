@@ -1,5 +1,6 @@
-{-# LANGUAGE DataKinds, FlexibleContexts, LambdaCase, OverloadedStrings #-}
-{-# LANGUAGE RecursiveDo, TypeApplications                              #-}
+{-# LANGUAGE ApplicativeDo, DataKinds, FlexibleContexts, LambdaCase #-}
+{-# LANGUAGE OverloadedStrings, RecordWildCards, RecursiveDo        #-}
+{-# LANGUAGE TypeApplications                                       #-}
 {-# OPTIONS_GHC -Wall #-}
 module Web.PlayAtHome.Frontend where
 import           Control.Arrow          ((>>>))
@@ -41,13 +42,12 @@ app ::
     MonadHold t m
   ) => m ()
 app = do
-  r <- getConfig "common/route"
   el "h1" $ text "Pλay At Home"
   rec
     msgEvDyn <-
       widgetHold (fmap Left <$> loginWidget initEvts)
       (leftmost
-        [ fmap (fmap Right) joinRoomWidget <$ loggedInEv
+        [ fmap (fmap Right) (joinRoomWidget playEvEvs) <$ loggedInEv
         , fmap (fmap Right) . roomWidget playEvEvs <$> joinedRoomEv
         ]
       )
@@ -69,6 +69,7 @@ app = do
               _ -> Nothing
             )
           playEvEvs
+    r <- getConfig "common/route"
     wsRespEv <- prerender (return never) $
       case checkEncoder fullRouteEncoder of
         Left err -> do
@@ -120,45 +121,6 @@ constButtonM
 constButtonM t act = do
   (e, _) <- elAttr' "button" ("type" =: "button") $ text t
   performEvent $ pushAlways (const $ pure act) (domEvent Click e)
-
-joinRoomWidget ::
-  ( DomBuilder t m, MonadFix m,
-    PostBuild t m, PerformEvent t m,
-    Prerender js t m
-  )
-  => m (Event t PlayCmd)
-joinRoomWidget = el "div" $ do
-  rec
-    room <- inputElement $ def
-      & inputElementConfig_setValue .~ ("" <$ eNewCmd)
-      & inputElementConfig_elementConfig
-      . elementConfig_initialAttributes
-      .~ ("placeholder" =: "部屋名" <> "id" =: "room-id")
-    pass <- inputElement $ def
-      & inputElementConfig_setValue .~ ("" <$ eNewCmd)
-      & inputElementConfig_elementConfig
-      . elementConfig_initialAttributes
-      .~ ("placeholder" =: "PASS" <>
-          "type" =: "password"
-          )
-    -- doFocus user
-    regBtn <- constButtonM "作成" (pure ())
-    loginBtn <- constButtonM "入室" (pure ())
-    let eNewCmd =
-          attachWith
-            (flip uncurry)
-            (current
-            $ (,) <$> value room
-                  <*> (Password <$> value pass)
-            )
-          (leftmost
-            [ CreateRoom <$ regBtn
-            , JoinRoom . RoomId . fromJust . UUID.fromText <$ keypress Enter room
-            , JoinRoom . RoomId . fromJust . UUID.fromText <$ keypress Enter pass
-            , JoinRoom . RoomId . fromJust . UUID.fromText <$ loginBtn
-            ]
-          )
-  return eNewCmd
 
 roomWidget ::
   ( DomBuilder t m, MonadHold t m, MonadFix m,
@@ -250,6 +212,92 @@ renderLog (JoinFailed now _) =
 tshow :: Show a => a -> T.Text
 tshow = T.pack . show
 
+data LoginLikeForm evt cmd =
+  LoginLikeForm
+  { loginHeader     :: Text
+  , loginLabel      :: Text
+  , createLabel     :: Text
+  , namePlaceholder :: Text
+  , nameId          :: Text
+  , passId          :: Text
+  , loginCmd        :: Text -> Password -> cmd
+  , createCmd       :: Text -> Password -> cmd
+  , validateEvent   :: evt -> Either Text ()
+  }
+
+mkLoginLikeForm ::
+  ( DomBuilder t m,
+    MonadFix m,
+    MonadHold t m,
+    PostBuild t m,
+    PerformEvent t m,
+    Prerender js t m
+  )
+  => LoginLikeForm evt cmd
+  -> Event t evt
+  -> m (Event t cmd)
+mkLoginLikeForm LoginLikeForm{..} evt = el "div" $ do
+  el "h2" $ text loginHeader
+  rec
+    curResp <- holdDyn (Right ()) colorOrChange
+    let colorOrChange = leftmost
+            [ validateEvent <$> evt
+            , Right () <$ domEvent Input name
+            , Right () <$ domEvent Input pass
+            ]
+        colorEvt = colorOrChange <&> \case
+          Right _ -> "style" =: Nothing
+          Left _  -> "style" =: Just "background-color: red"
+    name <- inputElement
+      $ def
+      & inputElementConfig_elementConfig
+      %~ (elementConfig_initialAttributes
+          .~ ("placeholder" =: namePlaceholder <>
+              "id" =: nameId
+              )
+          >>> elementConfig_modifyAttributes .~ colorEvt
+          )
+    pass <- inputElement $ def
+      & inputElementConfig_elementConfig
+      %~ (elementConfig_initialAttributes
+            .~ ("placeholder" =: "PASS" <>
+                "type" =: "password" <>
+                "id" =: passId
+                )
+          >>> elementConfig_modifyAttributes .~ colorEvt
+          )
+    let disabled = do
+          dis <- (||) <$> (T.null <$> value name)
+                      <*> (T.null <$> value pass)
+          pure $ if dis
+            then "disabled" =: "disabled"
+            else mempty
+    regBtn <- domEvent Click . fst
+          <$> elDynAttr' "button" (mappend ("type" =: "button") <$> disabled)
+              (text createLabel)
+    loginBtn <- domEvent Click . fst
+            <$> elDynAttr' "button" (mappend ("type" =: "button") <$> disabled)
+                (text loginLabel)
+    let eNewCmd =
+          attachWith
+            (flip uncurry)
+            (current $ (,) <$> value name <*>  (Password <$> value pass))
+          (leftmost
+            [ createCmd <$ regBtn
+            , loginCmd <$ keypress Enter name
+            , loginCmd <$ keypress Enter pass
+            , loginCmd <$ loginBtn
+            ]
+          )
+    elDynAttr "div"
+      (curResp <&> \case
+        Right _ -> "style" =: "visibility: hidden"
+        Left _  -> "style" =: "visibility: visible; font-size: small; color: red"
+      )
+      $ dynText $ either id (const "") <$> curResp
+
+  return eNewCmd
+
 loginWidget ::
   ( DomBuilder t m, MonadFix m,
     MonadHold t m,
@@ -258,66 +306,49 @@ loginWidget ::
   )
   => Event t InitEvent
   -> m (Event t InitCmd)
-loginWidget evt = el "div" $ do
-  rec
-    curResp <- holdDyn (Right ()) colorOrChange
-    let colorOrChange = leftmost
-            [ Left <$> evt
-            , Right () <$ domEvent Input user
-            , Right () <$ domEvent Input pass
-            ]
-        colorEvt = colorOrChange <&> \case
-          Left LogInSuccess{} -> mempty
-          Right () -> "style" =: Nothing
-          Left _ -> "style" =: Just "background-color: red"
-    user <- inputElement
-      $ def
-      & inputElementConfig_setValue .~ (runUserId . initUid <$> eNewCmd)
-      & inputElementConfig_elementConfig
-      %~ (elementConfig_initialAttributes
-              .~ ("placeholder" =: "User Name")
-          >>> elementConfig_modifyAttributes .~ colorEvt
-          )
-    pass <- inputElement $ def
-      & inputElementConfig_setValue .~ (getPassword . initPassword <$> eNewCmd)
-      & inputElementConfig_elementConfig
-      %~ (elementConfig_initialAttributes
-            .~ ("placeholder" =: "PASS" <>
-                "type" =: "password"
-                )
-          >>> elementConfig_modifyAttributes .~ colorEvt
-          )
-
-    -- doFocus user
-    regBtn <- constButtonM "登録" $ pure ()
-    loginBtn <- constButtonM "Login" $ pure ()
-    let eNewCmd =
-          attachWith
-            (flip uncurry)
-            (current
-            $ (,) . UserId . T.strip <$> value user <*> (Password <$> value pass)
-            )
-          (leftmost
-            [ CreateUser <$ regBtn
-            , LogIn <$ keypress Enter user
-            , LogIn <$ keypress Enter pass
-            , LogIn <$ loginBtn
-            ]
-          )
-    elDynAttr "div"
-      (curResp <&> \case
-        Right () -> "style" =: "visibility: hidden"
-        Left LogInSuccess{} -> "style" =: "visibility: hidden"
-        Left _ -> "style" =: "visibility: visible; font-size: small; color: red"
-      )
-      $ dynText $ curResp <&> \case
-        Left (LogInFailed now uid) ->
+loginWidget =
+  mkLoginLikeForm LoginLikeForm
+    { loginHeader     = "ユーザログイン／登録"
+    , loginLabel      = "ログイン"
+    , createLabel     = "登録"
+    , namePlaceholder = "ユーザ名"
+    , nameId          = "user"
+    , passId          = "pass"
+    , loginCmd        = LogIn . UserId
+    , createCmd       = CreateUser . UserId
+    , validateEvent   = \case
+        LogInFailed now uid -> Left $
           T.pack (show now) <> ": ログイン失敗（" <> runUserId uid <>  "）；パスワードか名前を確認してね"
-        Left (UserAlreadyExists now uid) ->
+        UserAlreadyExists now uid -> Left $
           T.pack (show now) <> ": ログイン失敗（" <> runUserId uid <>  "）；パスワードか名前を確認してね"
-        _ -> ""
+        _ -> Right ()
+    }
 
-  return eNewCmd
+
+joinRoomWidget ::
+  ( DomBuilder t m, MonadFix m,
+    PostBuild t m, PerformEvent t m,
+    Prerender js t m, MonadHold t m
+  )
+  => Event t PlayEvent
+  -> m (Event t PlayCmd)
+joinRoomWidget = mkLoginLikeForm LoginLikeForm
+    { loginHeader     = "部屋の作成／入室"
+    , loginLabel      = "入室"
+    , createLabel     = "作成"
+    , namePlaceholder = "部屋ID／部屋名"
+    , nameId          = "room-id"
+    , passId          = "room-pass"
+    , loginCmd        = JoinRoom . RoomId . fromJust . UUID.fromText
+    , createCmd       = CreateRoom
+    , validateEvent   = \case
+        RoomNotFound now rid ->
+          Left $ tshow now <> "そんな部屋ありません：" <> UUID.toText (getRoomId rid)
+        JoinFailed now rid ->
+          Left $ tshow now <> "そんな部屋ありません：" <> UUID.toText (getRoomId rid)
+        _ -> Right ()
+    }
+
 
 -- This runs in a monad that can be run on the client or the server.
 -- To run code in a pure client or pure server context, use one of the

@@ -80,7 +80,6 @@ startSession tsess conn uid = do
         Left err -> do
           now <- getCurrentTime
           send conn $ InvalidCommand now $ show err
-          throwIO $ userError "Invalid command"
         Right (JoinRoom rid pwd) -> do
           now <- getCurrentTime
           eMsg <- atomically $ do
