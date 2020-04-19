@@ -1,21 +1,24 @@
 {-# LANGUAGE DeriveAnyClass, DeriveGeneric, DerivingStrategies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving, TemplateHaskell       #-}
-{-# OPTIONS_GHC -funbox-strict-fields #-}
+{-# OPTIONS_GHC -funbox-strict-fields -Wall #-}
 module Web.PlayAtHome.Types
-  ( PlayCmd(..), PlayEvent(..)
+  ( PlayCmd(..), PlayEvent(..), peRoomId,
+    _JoinedRoom, _YouJoinedRoom, _DiceRolled,
+    _MemberLeft, _Bye, _InvalidCommand, _RoomCreated,
+    _RoomNotFound, _NotRoomMember, _JoinFailed
   , InitCmd(..), InitEvent(..)
   , isValidPassword, hashPassword
   , Password(..), UserId(..), RoomId(..)
   , Dice(..), Card(..), Deck(..)
   , PassHash(..)
-  , RoomInfo(..), roomMembersL, roomNameL
+  , RoomInfo(..), roomMembersL, roomNameL, roomIdL
   ) where
 import           Control.Lens
 import           Crypto.PasswordStore
 import           Data.Aeson
 import           Data.ByteString       (ByteString)
 import           Data.Hashable
-import qualified Data.HashSet          as HS
+import qualified Data.Set              as Set
 import           Data.String
 import           Data.Text             (Text)
 import           Data.Text.Encoding    (encodeUtf8)
@@ -66,18 +69,25 @@ data Dice =
 
 data RoomInfo = RoomInfo
   { roomName    :: !Text
-  , roomMembers :: HS.HashSet UserId
+  , roomMembers :: Set.Set UserId
+  , roomId      :: !RoomId
   }
   deriving (Read, Show, Eq, Ord, Generic)
-  deriving anyclass (Hashable, ToJSON, FromJSON)
+  deriving anyclass (ToJSON, FromJSON)
 
 makeLensesWith
   (lensRules &  lensField .~ mappingNamer (pure . (++ "L")))
   ''RoomInfo
 
 data InitCmd
-  = LogIn !UserId !Password
-  | CreateUser !UserId !Password
+  = LogIn
+    { initUid      :: !UserId
+    , initPassword :: !Password
+    }
+  | CreateUser
+      { initUid      :: !UserId
+      , initPassword :: !Password
+      }
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
@@ -101,13 +111,26 @@ data PlayEvent
   | DiceRolled !UTCTime !RoomId !UserId !Dice
   | MemberLeft !UTCTime !UserId !RoomId
   | Bye !UTCTime
-  | InvalidCommand String
-  | RoomCreated !UTCTime !RoomId
+  | InvalidCommand !UTCTime String
+  | RoomCreated !UTCTime !RoomId !RoomInfo
   | RoomNotFound !UTCTime !RoomId
   | NotRoomMember !UTCTime !RoomId !UserId
   | JoinFailed !UTCTime !RoomId
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
+
+peRoomId :: PlayEvent -> Maybe RoomId
+peRoomId (JoinedRoom _ rid _)    = Just rid
+peRoomId (YouJoinedRoom _ rid _) = Just rid
+peRoomId (DiceRolled _ rid _ _)  = Just rid
+peRoomId (MemberLeft _ _ rid)    = Just rid
+peRoomId (RoomCreated _ rid _)   = Just rid
+peRoomId (RoomNotFound _ rid)    = Just rid
+peRoomId (JoinFailed _ rid)      = Just rid
+peRoomId (NotRoomMember _ rid _) = Just rid
+peRoomId _                       = Nothing
+
+makePrisms ''PlayEvent
 
 newtype Card  = Card { getCard :: Text }
   deriving (Read, Show, Eq, Ord, Generic)

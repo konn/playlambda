@@ -8,7 +8,7 @@ import           Control.Monad
 import           Data.Aeson
 import           Data.Dependent.Sum           (DSum (..))
 import qualified Data.HashMap.Strict          as HM
-import qualified Data.HashSet                 as HS
+import qualified Data.Set                     as S
 import           Data.Time
 import qualified Data.UUID.V4                 as UUID
 import qualified Network.WebSockets           as WS
@@ -24,9 +24,9 @@ application tState pending = do
   WS.forkPingThread conn 30
   src <- WS.receiveData conn
   case eitherDecode @InitCmd src of
-    Left err ->
-      WS.sendClose conn $ encode $
-        InvalidCommand $ "Invalid command: " ++ show err
+    Left err -> do
+      now <- getCurrentTime
+      send conn $ InvalidCommand now $ "Invalid command: " ++ show err
     Right cmd -> procInitialCmd tState conn cmd
 
 send :: ToJSON d => WS.Connection -> d -> IO ()
@@ -41,11 +41,12 @@ procInitialCmd tState conn (LogIn uid passwd) = do
   case HM.lookup uid serverUserPasses of
     Just hsh
       | isValidPassword hsh passwd -> do
+        putStrLn "Successed. Hashing"
         send conn $ LogInSuccess now uid
         startSession tState conn uid
-    _ -> WS.sendClose conn $ encode $
-          LogInFailed now uid
+    _ -> send conn $ LogInFailed now uid
 procInitialCmd tState conn (CreateUser uid passwd) = do
+  putStrLn $ "Registering: " ++ show uid
   now <- getCurrentTime
   phash <- hashPassword passwd 12
   est <- atomically $ do
@@ -60,7 +61,7 @@ procInitialCmd tState conn (CreateUser uid passwd) = do
     Right msg -> do
       send conn msg
       startSession tState conn uid
-    Left err -> WS.sendClose conn $ encode err
+    Left err -> send conn err
 
 startSession
   :: TVar ServerState
@@ -77,7 +78,8 @@ startSession tsess conn uid = do
       src <- WS.receiveData conn
       case eitherDecode src of
         Left err -> do
-          send conn $ InvalidCommand $ show err
+          now <- getCurrentTime
+          send conn $ InvalidCommand now $ show err
           throwIO $ userError "Invalid command"
         Right (JoinRoom rid pwd) -> do
           now <- getCurrentTime
@@ -89,7 +91,7 @@ startSession tsess conn uid = do
                 -> do
                   let rinfo = (serverRooms HM.! rid)
                             & roomMembersL
-                            %~ HS.insert uid
+                            %~ S.insert uid
                   writeTVar tsess $
                     st & serverRoomsL.at rid ?~ rinfo
                   pure $ Right rinfo
@@ -99,7 +101,7 @@ startSession tsess conn uid = do
             Right rinfo -> do
               send conn $ YouJoinedRoom now rid rinfo
               forM_ (roomMembers rinfo) $ \uid' ->
-                when (uid /= uid) $ do
+                when (uid /= uid') $ do
                 conns <- serverUserConns
                   <$> readTVarIO tsess
                 forM_ (HM.lookup uid' conns) $ \conn' ->
@@ -108,19 +110,18 @@ startSession tsess conn uid = do
         Right (CreateRoom title pwd) -> do
           rid <- RoomId <$> UUID.nextRandom
           hsh <- hashPassword pwd 12
-          atomically $ modifyTVar' tsess $ \st ->
-            st & serverRoomsL %~
-              HM.insert rid
-              RoomInfo
+          let rinfo = RoomInfo
                 { roomName = title
-                , roomMembers = HS.singleton uid
+                , roomMembers = S.singleton uid
+                , roomId = rid
                 }
-              & serverRoomPassesL %~
-                  HM.insert rid hsh
+          atomically $ modifyTVar' tsess $ \st ->
+            st  & serverRoomsL      %~ HM.insert rid rinfo
+                & serverRoomPassesL %~ HM.insert rid hsh
           now <- getCurrentTime
-          WS.sendBinaryData conn $ encode $
-            RoomCreated now rid
-          WS.sendBinaryData conn $ encode $
+          send conn $
+            RoomCreated now rid rinfo
+          send conn $
             JoinedRoom now rid uid
 
         Right (DiceRoll rid dice) -> do
@@ -130,7 +131,7 @@ startSession tsess conn uid = do
           case mans of
             Nothing -> send conn $ RoomNotFound now rid
             Just RoomInfo{..}
-              | uid `HS.member` roomMembers
+              | uid `S.member` roomMembers
               -> forM_ roomMembers $ \uid' -> do
                 conns <- serverUserConns
                   <$> readTVarIO tsess
@@ -139,17 +140,16 @@ startSession tsess conn uid = do
               | otherwise -> send conn
                 $ NotRoomMember now rid uid
 
-
-
 unregisterUser
   :: TVar ServerState -> UserId -> WS.Connection -> IO ()
 unregisterUser tses uid conn = do
+  putStrLn $ "Unregistering: " ++ show uid
   _rooms <- atomically $ do
     st@ServerState{..} <- readTVar tses
     writeTVar tses $
       st  & serverUserConnsL %~ HM.delete uid
-          & serverRoomsL %~ HM.map (roomMembersL %~ HS.delete uid)
-    pure $ HM.filter (HS.member uid . roomMembers)
+          & serverRoomsL %~ HM.map (roomMembersL %~ S.delete uid)
+    pure $ HM.filter (S.member uid . roomMembers)
         $ st ^. serverRoomsL
   -- TODO: Send @MemberLeft@ commands to remaining members
   now <- getCurrentTime

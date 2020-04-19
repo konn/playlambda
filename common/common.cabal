@@ -4,6 +4,7 @@ cabal-version: >= 1.2
 build-type: Simple
 
 library
+  ghc-options:    -Wall
   hs-source-dirs: src
   build-depends:  base
                 , containers

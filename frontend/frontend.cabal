@@ -25,16 +25,24 @@ library
                 , common
                 , jsaddle
                 , lens
+                , time
                 , obelisk-executable-config-lookup
                 , obelisk-frontend
                 , obelisk-generated-static
                 , obelisk-route
                 , random
+                , jsaddle-dom
+                , modern-uri
                 , reflex
                 , reflex-dom
                 , text
+                , uuid
+                , aeson
+                , bytestring
+                , containers
   exposed-modules:
     Web.PlayAtHome.Frontend
+    Web.PlayAtHome.Frontend.Types
   ghc-options: -Wall
 
 executable frontend
@@ -46,6 +54,7 @@ executable frontend
                 , obelisk-route
                 , reflex-dom
                 , frontend
+                , jsaddle-dom
   --TODO: Make these ghc-options optional
   ghc-options: -threaded
   if os(darwin)
