@@ -5,6 +5,7 @@ import           Control.Concurrent.STM
 import           Control.Exception
 import           Control.Lens
 import           Control.Monad
+import           Control.Monad.Loops
 import           Data.Aeson
 import           Data.Dependent.Sum           (DSum (..))
 import qualified Data.HashMap.Strict          as HM
@@ -41,12 +42,13 @@ procInitialCmd tState conn (LogIn uid passwd) = do
   case HM.lookup uid serverUserPasses of
     Just hsh
       | isValidPassword hsh passwd -> do
-        putStrLn "Successed. Hashing"
         send conn $ LogInSuccess now uid
         startSession tState conn uid
-    _ -> send conn $ LogInFailed now uid
+    _ -> do
+      send conn $ LogInFailed now uid
+      procInitialCmd tState conn
+        =<< untilJust (decode <$> WS.receiveData conn)
 procInitialCmd tState conn (CreateUser uid passwd) = do
-  putStrLn $ "Registering: " ++ show uid
   now <- getCurrentTime
   phash <- hashPassword passwd 12
   est <- atomically $ do
@@ -61,7 +63,10 @@ procInitialCmd tState conn (CreateUser uid passwd) = do
     Right msg -> do
       send conn msg
       startSession tState conn uid
-    Left err -> send conn err
+    Left err -> do
+      send conn err
+      procInitialCmd tState conn
+        =<< untilJust (decode <$> WS.receiveData conn)
 
 startSession
   :: TVar ServerState
@@ -94,7 +99,7 @@ startSession tsess conn uid = do
                   writeTVar tsess $
                     st & serverRoomsL.at rid ?~ rinfo
                   pure $ Right rinfo
-              _ -> pure $ Left $ JoinFailed now rid
+              _ ->  pure $ Left $ JoinFailed now rid
           case eMsg of
             Left msg -> send conn msg
             Right rinfo -> do
@@ -137,12 +142,11 @@ startSession tsess conn uid = do
                 forM_ (HM.lookup uid' conns) $ \c ->
                   send c $ DiceRolled now rid uid dice
               | otherwise -> send conn
-                $ NotRoomMember now rid uid
+                  $ NotRoomMember now rid uid
 
 unregisterUser
   :: TVar ServerState -> UserId -> WS.Connection -> IO ()
 unregisterUser tses uid conn = do
-  putStrLn $ "Unregistering: " ++ show uid
   _rooms <- atomically $ do
     st@ServerState{..} <- readTVar tses
     writeTVar tses $

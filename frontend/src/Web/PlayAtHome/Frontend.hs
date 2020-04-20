@@ -3,32 +3,35 @@
 {-# LANGUAGE TypeApplications                                       #-}
 {-# OPTIONS_GHC -Wall #-}
 module Web.PlayAtHome.Frontend where
-import           Control.Arrow          ((>>>))
+import           Control.Arrow                        ((>>>))
 import           Control.Lens
 import           Control.Monad.Fix
 import           Control.Monad.IO.Class
-import qualified Data.Aeson             as Aeson
-import           Data.ByteString.Lazy   (fromStrict, toStrict)
-import           Data.List.NonEmpty     (nonEmpty)
-import           Data.Map.Strict        (Map)
-import           Data.Maybe
-import           Data.Monoid            ((<>))
-import qualified Data.Set               as Set
-import           Data.Text              (Text)
-import qualified Data.Text              as T
-import qualified Data.Text.Encoding     as T
+import qualified Data.Aeson                           as Aeson
+import           Data.ByteString.Lazy                 (fromStrict, toStrict)
+import qualified Data.ByteString.Lazy.Char8           as LBS
+import           Data.List.NonEmpty                   (nonEmpty)
+import           Data.Map.Strict                      (Map)
+import           Data.Monoid                          ((<>))
+import qualified Data.Set                             as Set
+import           Data.Text                            (Text)
+import qualified Data.Text                            as T
+import qualified Data.Text.Encoding                   as T
 import           Data.Time
-import           Data.UUID              as UUID
+import           Data.UUID                            as UUID
+import           Language.Javascript.JSaddle.Evaluate (eval)
+import           Language.Javascript.JSaddle.Monad
 import           Reflex
 import           Reflex.Dom
 import           System.Random
-import           Text.URI               hiding (Password)
+import           Text.URI                             hiding (Password)
 
 import Obelisk.Configs
 import Obelisk.Frontend
 import Obelisk.Generated.Static
 import Obelisk.Route
 
+import Control.Lens.Extras  (is)
 import Control.Monad        (void)
 import Web.PlayAtHome.Route
 import Web.PlayAtHome.Types
@@ -45,10 +48,11 @@ app = do
   el "h1" $ text "Pλay At Home"
   rec
     msgEvDyn <-
-      widgetHold (fmap Left <$> loginWidget initEvts)
+      widgetHold (fmap Aeson.toJSON <$> loginWidget initEvts)
       (leftmost
-        [ fmap (fmap Right) (joinRoomWidget playEvEvs) <$ loggedInEv
-        , fmap (fmap Right) . roomWidget playEvEvs <$> joinedRoomEv
+        [ fmap (fmap Aeson.toJSON) (joinRoomWidget playEvEvs) <$
+            leftmost [roomFailureEv, loggedInEv]
+        , fmap (fmap Aeson.toJSON) . roomWidget playEvEvs <$> joinedRoomEv
         ]
       )
     let msgSendEv = switch $ current msgEvDyn
@@ -57,10 +61,21 @@ app = do
         playEvEvs =
           fmapMaybe (Aeson.decode @PlayEvent . fromStrict)
             $ switchDyn wsRespEv
-    loggedInEv <- headE $
-      ffilter
-        (\case { LogInSuccess{} -> True; _ -> False})
-        initEvts
+        roomFailureEv = () <$
+          ffilter
+            (\case
+              RoomNotFound{} -> True
+              JoinFailed {} -> True
+              _ -> False
+            )
+          playEvEvs
+        loggedInEv = () <$
+          ffilter
+            (\case
+                LogInSuccess{} -> True
+                _ -> False
+            )
+            initEvts
     let joinedRoomEv =
           fmapMaybe
             (\case
@@ -79,9 +94,7 @@ app = do
           let wsPath = fst $ encode encoder $
                 FullRoute_Backend BackendRoute_Room :/ ()
               sendEv =
-                pure . toStrict
-                . either Aeson.encode Aeson.encode
-                <$> msgSendEv
+                pure . toStrict . Aeson.encode <$> msgSendEv
           let mUri = do
                 uri' <- mkURI . T.decodeUtf8 =<< r
                 pathPiece <- nonEmpty =<< mapM mkPathPiece wsPath
@@ -97,8 +110,12 @@ app = do
             Nothing -> return never
             Just uri -> do
               ws <- webSocket (render uri) $ def & webSocketConfig_send .~ sendEv
+              performEvent $ _webSocket_recv ws <&> \ inp ->
+                  liftJSM $ void $ eval
+                    ("console.log('Here comes: ' + " <>
+                      LBS.unpack (Aeson.encode $ T.decodeUtf8 inp)
+                    <> ")" :: String)
               return (_webSocket_recv ws)
-
   return ()
 
 diceRoller
@@ -212,15 +229,16 @@ renderLog (JoinFailed now _) =
 tshow :: Show a => a -> T.Text
 tshow = T.pack . show
 
-data LoginLikeForm evt cmd =
+data LoginLikeForm ident evt cmd  =
   LoginLikeForm
   { loginHeader     :: Text
   , loginLabel      :: Text
   , createLabel     :: Text
   , namePlaceholder :: Text
+  , validateName    :: Text -> Either Text ident
   , nameId          :: Text
   , passId          :: Text
-  , loginCmd        :: Text -> Password -> cmd
+  , loginCmd        :: ident -> Password -> cmd
   , createCmd       :: Text -> Password -> cmd
   , validateEvent   :: evt -> Either Text ()
   }
@@ -233,17 +251,17 @@ mkLoginLikeForm ::
     PerformEvent t m,
     Prerender js t m
   )
-  => LoginLikeForm evt cmd
+  => LoginLikeForm ident evt cmd
   -> Event t evt
   -> m (Event t cmd)
 mkLoginLikeForm LoginLikeForm{..} evt = el "div" $ do
   el "h2" $ text loginHeader
   rec
-    curResp <- holdDyn (Right ()) colorOrChange
     let colorOrChange = leftmost
             [ validateEvent <$> evt
             , Right () <$ domEvent Input name
             , Right () <$ domEvent Input pass
+            , (() <$) <$> loginEv'
             ]
         colorEvt = colorOrChange <&> \case
           Right _ -> "style" =: Nothing
@@ -266,29 +284,30 @@ mkLoginLikeForm LoginLikeForm{..} evt = el "div" $ do
                 )
           >>> elementConfig_modifyAttributes .~ colorEvt
           )
-    let disabled = do
-          dis <- (||) <$> (T.null <$> value name)
-                      <*> (T.null <$> value pass)
-          pure $ if dis
-            then "disabled" =: "disabled"
-            else mempty
+    let isDisabled =
+          (||)  <$> (T.null <$> value name)
+                <*> (T.null <$> value pass)
+        disabled b  | b = "disabled" =: "disabled" :: Map Text Text
+                    | otherwise =  mempty
+    loginDis <- holdDyn False (is _Left <$> loginEv')
     regBtn <- domEvent Click . fst
-          <$> elDynAttr' "button" (mappend ("type" =: "button") <$> disabled)
+          <$> elDynAttr' "button" (mappend ("type" =: "button") . disabled <$> isDisabled)
               (text createLabel)
     loginBtn <- domEvent Click . fst
-            <$> elDynAttr' "button" (mappend ("type" =: "button") <$> disabled)
+            <$> elDynAttr' "button" (mappend ("type" =: "button") . disabled <$>
+                    ((||) <$> loginDis <*> isDisabled)
+                  )
                 (text loginLabel)
-    let eNewCmd =
-          attachWith
-            (flip uncurry)
-            (current $ (,) <$> value name <*>  (Password <$> value pass))
-          (leftmost
-            [ createCmd <$ regBtn
-            , loginCmd <$ keypress Enter name
-            , loginCmd <$ keypress Enter pass
-            , loginCmd <$ loginBtn
-            ]
-          )
+    let eNewCmd = leftmost [createEv, loginEv]
+        createEv =
+          current (createCmd <$> value name <*>  (Password <$> value pass))
+            <@ regBtn
+        loginEv = fmapMaybe (either (const Nothing) Just)  loginEv'
+        loginEv' =
+          current (loginCmdM <$> value name <*> (Password <$> value pass))
+          <@
+          leftmost [keypress Enter name, keypress Enter pass, loginBtn]
+    curResp <- holdDyn (Right ()) colorOrChange
     elDynAttr "div"
       (curResp <&> \case
         Right _ -> "style" =: "visibility: hidden"
@@ -297,6 +316,9 @@ mkLoginLikeForm LoginLikeForm{..} evt = el "div" $ do
       $ dynText $ either id (const "") <$> curResp
 
   return eNewCmd
+  where
+    loginCmdM txt pw =
+      flip loginCmd pw <$> validateName txt
 
 loginWidget ::
   ( DomBuilder t m, MonadFix m,
@@ -312,6 +334,7 @@ loginWidget =
     , loginLabel      = "ログイン"
     , createLabel     = "登録"
     , namePlaceholder = "ユーザ名"
+    , validateName = Right
     , nameId          = "user"
     , passId          = "pass"
     , loginCmd        = LogIn . UserId
@@ -339,7 +362,9 @@ joinRoomWidget = mkLoginLikeForm LoginLikeForm
     , namePlaceholder = "部屋ID／部屋名"
     , nameId          = "room-id"
     , passId          = "room-pass"
-    , loginCmd        = JoinRoom . RoomId . fromJust . UUID.fromText
+    , validateName =
+        maybe (Left "部屋名が正しくありません") (Right . RoomId) . UUID.fromText
+    , loginCmd        = JoinRoom
     , createCmd       = CreateRoom
     , validateEvent   = \case
         RoomNotFound now rid ->
@@ -360,18 +385,3 @@ frontend = Frontend
       elAttr "link" ("href" =: static @"main.css" <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
   , _frontend_body = app
   }
-
-{- doFocus
-  :: (DomBuilder t m,
-      PostBuild t m,
-      PerformEvent t m,
-      Prerender js t m
-    )
-  => InputElement EventResult (DomBuilderSpace m) t
-  -> m ()
-doFocus ie = prerender_ (return ()) $ do
-  pb <- getPostBuild
-  let h = _inputElement_raw ie
-  performEvent_ (fmap (liftJSM . const (focus h)) pb)
-  return ()
- -}
