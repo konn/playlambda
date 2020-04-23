@@ -7,20 +7,19 @@ import Control.Monad.IO.Class
 import Data.Maybe                  (fromJust)
 import Language.Javascript.JSaddle
 
-newtype Promise a = Promise { runPromise :: a }
-  deriving (Read, Show, Eq, Ord)
+newtype Promise a = Promise { runPromise :: JSVal }
 
-instance MakeObject a => MakeObject (Promise a) where
+instance MakeObject (Promise a) where
   makeObject = makeObject . runPromise
 
 instance ToJSVal a => ToJSVal (Promise a) where
   toJSVal = toJSVal . runPromise
 
-instance FromJSVal a => FromJSVal (Promise a) where
-  fromJSVal = fmap (fmap Promise) . fromJSVal @a
+instance FromJSVal (Promise a) where
+  fromJSVal = fmap (fmap Promise) . fromJSVal
 
-await :: (MakeObject a, FromJSVal a) => Promise a -> JSM a
-await (Promise jsv) = do
+await :: (FromJSVal a) => Promise a -> JSM a
+await jsv = do
   slot <- liftIO newEmptyMVar
   void $ jsv ^. js1 "then" (fun $ \_ _ [e] ->
     liftIO $ putMVar slot e

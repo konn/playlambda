@@ -30,6 +30,9 @@ import qualified Data.Text.Encoding          as T
 import           Data.Time
 import           Data.UUID                   as UUID
 import           GHC.Generics                (Generic)
+import           JSDOM                       (currentWindowUnchecked)
+import           JSDOM.Custom.Window         (getHistory)
+import           JSDOM.Generated.History     (replaceState)
 import           JSDOM.Types                 (JSVal)
 import           Language.Javascript.JSaddle
 import           Obelisk.Configs
@@ -49,7 +52,7 @@ default (Text)
 
 getAuth0 :: MonadJSM m => Auth0Config -> m (Promise Auth0)
 getAuth0 cfg = liftJSM $
-  Promise . Auth0 <$> jsg1 "createAuth0Client" (Aeson.toJSON cfg)
+  Promise <$> jsg1 "createAuth0Client" (Aeson.toJSON cfg)
 
 instance MakeObject Auth0 where
   makeObject (Auth0 ob) = pure $ Object ob
@@ -57,7 +60,7 @@ instance MakeObject Auth0 where
 isAuthenticated
   :: MonadJSM m => Auth0 -> m Bool
 isAuthenticated auth0 = liftJSM $
-  fromJSValUnchecked =<< (auth0 ^. js0 ("isAuthenticated" :: String))
+  await =<< fromJSValUnchecked =<< (auth0 ^. js0 ("isAuthenticated" :: String))
 
 app ::
   ( DomBuilder t m, MonadFix m,
@@ -82,15 +85,15 @@ app = do
       pb <- getPostBuild
       auth0Ev <- performEvent $ pb <&> \_ -> do
         auth0 <- liftJSM . await =<< getAuth0 authConf
-        console <- liftJSM $ jsg "console"
-        liftJSM $ do
-          console ^. js1 "log" (Aeson.toJSON authConf)
-          console ^. js1 "log" auth0
-          console ^. js1 "log" (M.keys params)
 
         let hasCode = M.member "code" params && M.member "state" params
-        when hasCode $
-          void $ liftJSM $ auth0 ^. js0 "handleRedirectCallback"
+        when hasCode $ liftJSM $ do
+          void $
+            await @JSVal =<< fromJSValUnchecked
+              =<< (auth0 ^. js0 "handleRedirectCallback")
+          window <- currentWindowUnchecked
+          hist <- getHistory window
+          replaceState hist obj "Pλay At Home" (T.decodeUtf8 <$> route)
         pure $ Just auth0
       dynAuth0 <- holdDyn Nothing  auth0Ev
       msgEvDyn <-
@@ -386,11 +389,17 @@ loginWidget  auth0 _iev = el "div" $ do
       ) $
         text "ログアウト"
     let loginEv = domEvent Click login
-        btnEvs = leftmost [loginEv, domEvent Click logout]
-    v <- prerender (return False) $ do
-        mauth0 <- sample $ current auth0
-        maybe (pure False) isAuthenticated mauth0
-    loggedIn <- holdDyn False (tagPromptlyDyn v btnEvs)
+        logOutEv = domEvent Click logout
+        btnEvs = leftmost [loginEv, logOutEv]
+    let auth0Ev = tagPromptlyDyn auth0 (leftmost [() <$ updated auth0, btnEvs])
+    void $ performEvent $ tagPromptlyDyn auth0 logOutEv <&> \case
+      Nothing -> pure ()
+      Just auth -> liftJSM $ void $ auth ^. js1 "logout"
+        (object ["retunTo" .= "https://localhost:8000"])
+    loggedInEv <- performEvent $ auth0Ev <&> \case
+      Nothing -> pure False
+      Just auth -> isAuthenticated auth
+    loggedIn <- holdDyn False loggedInEv
 
   performEvent $
     tagPromptlyDyn
@@ -398,7 +407,7 @@ loginWidget  auth0 _iev = el "div" $ do
       Nothing -> pure ()
       (Just auther) -> liftJSM $
         void $ auther ^. js1 "loginWithRedirect"
-                  (object ["redirect_uri" .= "http://localhost:8000/" ])
+                  (object ["redirect_uri" .= "http://localhost:8000" ])
     )
     loginEv
   pure never
