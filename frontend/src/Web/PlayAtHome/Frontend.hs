@@ -1,40 +1,63 @@
-{-# LANGUAGE ApplicativeDo, DataKinds, FlexibleContexts, LambdaCase #-}
-{-# LANGUAGE OverloadedStrings, RecordWildCards, RecursiveDo        #-}
-{-# LANGUAGE TypeApplications                                       #-}
-{-# OPTIONS_GHC -Wall #-}
+{-# LANGUAGE ApplicativeDo, DataKinds, DeriveAnyClass, DeriveGeneric    #-}
+{-# LANGUAGE DerivingStrategies, ExtendedDefaultRules, FlexibleContexts #-}
+{-# LANGUAGE GADTs, LambdaCase, OverloadedStrings, RecordWildCards      #-}
+{-# LANGUAGE RecursiveDo, TypeApplications                              #-}
+{-# OPTIONS_GHC -Wall -Wno-type-defaults #-}
 module Web.PlayAtHome.Frontend where
-import           Control.Arrow                        ((>>>))
-import           Control.Lens
+import Web.PlayAtHome.Route
+import Web.PlayAtHome.Types
+
+import           Control.Arrow               ((>>>))
+import           Control.Lens                hiding ((.=))
+import           Control.Lens.Extras         (is)
+import           Control.Monad               (void, when)
 import           Control.Monad.Fix
 import           Control.Monad.IO.Class
-import qualified Data.Aeson                           as Aeson
-import           Data.ByteString.Lazy                 (fromStrict, toStrict)
-import qualified Data.ByteString.Lazy.Char8           as LBS
-import           Data.List.NonEmpty                   (nonEmpty)
-import           Data.Map.Strict                      (Map)
-import           Data.Monoid                          ((<>))
-import qualified Data.Set                             as Set
-import           Data.Text                            (Text)
-import qualified Data.Text                            as T
-import qualified Data.Text.Encoding                   as T
+import           Data.Aeson                  (object, (.=))
+import qualified Data.Aeson                  as Aeson
+import           Data.ByteString.Lazy        (fromStrict, toStrict)
+import           Data.Dependent.Sum
+import           Data.List.NonEmpty          (nonEmpty)
+import           Data.Map.Strict             (Map)
+import qualified Data.Map.Strict             as M
+import           Data.Maybe                  (fromMaybe)
+import           Data.Monoid                 ((<>))
+import           Data.Promise
+import qualified Data.Set                    as Set
+import           Data.Text                   (Text)
+import qualified Data.Text                   as T
+import qualified Data.Text.Encoding          as T
 import           Data.Time
-import           Data.UUID                            as UUID
-import           Language.Javascript.JSaddle.Evaluate (eval)
-import           Language.Javascript.JSaddle.Monad
+import           Data.UUID                   as UUID
+import           GHC.Generics                (Generic)
+import           JSDOM.Types                 (JSVal)
+import           Language.Javascript.JSaddle
+import           Obelisk.Configs
+import           Obelisk.Frontend
+import           Obelisk.Generated.Static
+import           Obelisk.Route
+import           Obelisk.Route.Frontend
 import           Reflex
 import           Reflex.Dom
 import           System.Random
-import           Text.URI                             hiding (Password)
+import           Text.URI                    hiding (Password)
 
-import Obelisk.Configs
-import Obelisk.Frontend
-import Obelisk.Generated.Static
-import Obelisk.Route
+newtype Auth0 = Auth0 { runAuth0  :: JSVal }
+  deriving (Generic)
+  deriving anyclass (ToJSVal, FromJSVal)
+default (Text)
 
-import Control.Lens.Extras  (is)
-import Control.Monad        (void)
-import Web.PlayAtHome.Route
-import Web.PlayAtHome.Types
+getAuth0 :: MonadJSM m => Auth0Config -> m (Promise Auth0)
+getAuth0 cfg = liftJSM $
+  Promise . Auth0 <$> jsg1 "createAuth0Client" (Aeson.toJSON cfg)
+
+instance MakeObject Auth0 where
+  makeObject (Auth0 ob) = pure $ Object ob
+
+isAuthenticated
+  :: MonadJSM m => Auth0 -> m Bool
+isAuthenticated auth0 = liftJSM $
+  fromJSValUnchecked =<< (auth0 ^. js0 ("isAuthenticated" :: String))
 
 app ::
   ( DomBuilder t m, MonadFix m,
@@ -42,81 +65,98 @@ app ::
     Prerender js t m, HasConfigs m,
     Reflex t,
     MonadIO (Performable m),
-    MonadHold t m
+    MonadHold t m,
+    Routed t (DSum FrontendRoute Identity) m
   ) => m ()
 app = do
+  r <- sample . current =<< askRoute
+  let params :: Map Text (Maybe Text)
+      params = case r of
+        FrontendRoute_Main :=> Identity dic -> dic
+  route <- getConfig "common/route"
+  authConf <- fromMaybe (error "Aeson decoding config failed") . Aeson.decode @Auth0Config . fromStrict . fromMaybe (error "Reading auth_config failed")
+    <$> getConfig "common/auth_config.json"
   el "h1" $ text "Pλay At Home"
-  rec
-    msgEvDyn <-
-      widgetHold (fmap Aeson.toJSON <$> loginWidget initEvts)
-      (leftmost
-        [ fmap (fmap Aeson.toJSON) (joinRoomWidget playEvEvs) <$
-            leftmost [roomFailureEv, loggedInEv]
-        , fmap (fmap Aeson.toJSON) . roomWidget playEvEvs <$> joinedRoomEv
-        ]
-      )
-    let msgSendEv = switch $ current msgEvDyn
-        initEvts = fmapMaybe (Aeson.decode @InitEvent . fromStrict)
-            $ switchDyn wsRespEv
-        playEvEvs =
-          fmapMaybe (Aeson.decode @PlayEvent . fromStrict)
-            $ switchDyn wsRespEv
-        roomFailureEv = () <$
-          ffilter
-            (\case
-              RoomNotFound{} -> True
-              JoinFailed {} -> True
-              _ -> False
-            )
-          playEvEvs
-        loggedInEv = () <$
-          ffilter
-            (\case
-                LogInSuccess{} -> True
+  void $ prerender (el "div" $ text "loading...") $ do
+    rec
+      pb <- getPostBuild
+      auth0Ev <- performEvent $ pb <&> \_ -> do
+        auth0 <- liftJSM . await =<< getAuth0 authConf
+        console <- liftJSM $ jsg "console"
+        liftJSM $ do
+          console ^. js1 "log" (Aeson.toJSON authConf)
+          console ^. js1 "log" auth0
+          console ^. js1 "log" (M.keys params)
+
+        let hasCode = M.member "code" params && M.member "state" params
+        when hasCode $
+          void $ liftJSM $ auth0 ^. js0 "handleRedirectCallback"
+        pure $ Just auth0
+      dynAuth0 <- holdDyn Nothing  auth0Ev
+      msgEvDyn <-
+        widgetHold (fmap Aeson.toJSON <$> loginWidget dynAuth0 initEvts)
+        (leftmost
+          [ fmap (fmap Aeson.toJSON) (joinRoomWidget playEvEvs) <$
+              leftmost [roomFailureEv, loggedInEv]
+          , fmap (fmap Aeson.toJSON) . roomWidget playEvEvs <$> joinedRoomEv
+          ]
+        )
+      let msgSendEv = switch $ current msgEvDyn
+          initEvts = fmapMaybe (Aeson.decode @InitEvent . fromStrict)
+              $ switchDyn wsRespEv
+          playEvEvs =
+            fmapMaybe (Aeson.decode @PlayEvent . fromStrict)
+              $ switchDyn wsRespEv
+          roomFailureEv = () <$
+            ffilter
+              (\case
+                RoomNotFound{} -> True
+                JoinFailed {} -> True
                 _ -> False
-            )
-            initEvts
-    let joinedRoomEv =
-          fmapMaybe
-            (\case
-              YouJoinedRoom _ _ rinfo -> Just rinfo
-              RoomCreated _ _ rinfo -> Just rinfo
-              _ -> Nothing
-            )
-          playEvEvs
-    r <- getConfig "common/route"
-    wsRespEv <- prerender (return never) $
-      case checkEncoder fullRouteEncoder of
-        Left err -> do
-          el "div" $ text err
-          return never
-        Right encoder -> do
-          let wsPath = fst $ encode encoder $
-                FullRoute_Backend BackendRoute_Room :/ ()
-              sendEv =
-                pure . toStrict . Aeson.encode <$> msgSendEv
-          let mUri = do
-                uri' <- mkURI . T.decodeUtf8 =<< r
-                pathPiece <- nonEmpty =<< mapM mkPathPiece wsPath
-                wsScheme <- case uriScheme uri' of
-                  rtextScheme | rtextScheme == mkScheme "https" -> mkScheme "wss"
-                  rtextScheme | rtextScheme == mkScheme "http" -> mkScheme "ws"
-                  _ -> Nothing
-                return $ uri'
-                  { uriPath = Just (False, pathPiece)
-                  , uriScheme = Just wsScheme
-                  }
-          case mUri of
-            Nothing -> return never
-            Just uri -> do
-              ws <- webSocket (render uri) $ def & webSocketConfig_send .~ sendEv
-              performEvent $ _webSocket_recv ws <&> \ inp ->
-                  liftJSM $ void $ eval
-                    ("console.log('Here comes: ' + " <>
-                      LBS.unpack (Aeson.encode $ T.decodeUtf8 inp)
-                    <> ")" :: String)
-              return (_webSocket_recv ws)
-  return ()
+              )
+            playEvEvs
+          loggedInEv = () <$
+            ffilter
+              (\case
+                  LogInSuccess{} -> True
+                  _ -> False
+              )
+              initEvts
+      let joinedRoomEv =
+            fmapMaybe
+              (\case
+                YouJoinedRoom _ _ rinfo -> Just rinfo
+                RoomCreated _ _ rinfo -> Just rinfo
+                _ -> Nothing
+              )
+            playEvEvs
+      wsRespEv <- prerender (return never) $
+        case checkEncoder fullRouteEncoder of
+          Left err -> do
+            el "div" $ text err
+            return never
+          Right encoder -> do
+            let wsPath = fst $ encode encoder $
+                  FullRoute_Backend BackendRoute_Room :/ ()
+                sendEv =
+                  pure . toStrict . Aeson.encode <$> msgSendEv
+            let mUri = do
+                  uri' <- mkURI . T.decodeUtf8 =<< route
+                  pathPiece <- nonEmpty =<< mapM mkPathPiece wsPath
+                  wsScheme <- case uriScheme uri' of
+                    rtextScheme | rtextScheme == mkScheme "https" -> mkScheme "wss"
+                    rtextScheme | rtextScheme == mkScheme "http" -> mkScheme "ws"
+                    _ -> Nothing
+                  return $ uri'
+                    { uriPath = Just (False, pathPiece)
+                    , uriScheme = Just wsScheme
+                    }
+            case mUri of
+              Nothing -> return never
+              Just uri -> do
+                ws <- webSocket (render uri) $ def & webSocketConfig_send .~ sendEv
+                return (_webSocket_recv ws)
+    return ()
 
 diceRoller
   :: (MonadIO (Performable m),
@@ -323,29 +363,45 @@ mkLoginLikeForm LoginLikeForm{..} evt = el "div" $ do
 loginWidget ::
   ( DomBuilder t m, MonadFix m,
     MonadHold t m,
-    PostBuild t m, PerformEvent t m,
-    Prerender js t m
+    PostBuild t m,
+    PerformEvent t m,
+    Prerender js t m,
+    MonadJSM (Performable m)
   )
-  => Event t InitEvent
+  => Dynamic t (Maybe Auth0)
+  -> Event t InitEvent
   -> m (Event t InitCmd)
-loginWidget =
-  mkLoginLikeForm LoginLikeForm
-    { loginHeader     = "ユーザログイン／登録"
-    , loginLabel      = "ログイン"
-    , createLabel     = "登録"
-    , namePlaceholder = "ユーザ名"
-    , validateName = Right
-    , nameId          = "user"
-    , passId          = "pass"
-    , loginCmd        = LogIn . UserId
-    , createCmd       = CreateUser . UserId
-    , validateEvent   = \case
-        LogInFailed now uid -> Left $
-          T.pack (show now) <> ": ログイン失敗（" <> runUserId uid <>  "）；パスワードか名前を確認してね"
-        UserAlreadyExists now uid -> Left $
-          T.pack (show now) <> ": ログイン失敗（" <> runUserId uid <>  "）；パスワードか名前を確認してね"
-        _ -> Right ()
-    }
+loginWidget  auth0 _iev = el "div" $ do
+  rec
+    (login, _) <- elDynAttr' "button"
+      (mappend ("id" =: "btn-login")
+      . (\p -> if p then "disabled" =: "disabled" else mempty)
+        <$> loggedIn
+      ) $
+        text "ログイン"
+    (logout, _) <- elDynAttr' "button"
+      (mappend ("id" =: "btn-login")
+      . (\p -> if p then mempty else "disabled" =: "disabled")
+      <$> loggedIn
+      ) $
+        text "ログアウト"
+    let loginEv = domEvent Click login
+        btnEvs = leftmost [loginEv, domEvent Click logout]
+    v <- prerender (return False) $ do
+        mauth0 <- sample $ current auth0
+        maybe (pure False) isAuthenticated mauth0
+    loggedIn <- holdDyn False (tagPromptlyDyn v btnEvs)
+
+  performEvent $
+    tagPromptlyDyn
+    (auth0 <&> \case
+      Nothing -> pure ()
+      (Just auther) -> liftJSM $
+        void $ auther ^. js1 "loginWithRedirect"
+                  (object ["redirect_uri" .= "http://localhost:8000/" ])
+    )
+    loginEv
+  pure never
 
 
 joinRoomWidget ::
@@ -383,5 +439,8 @@ frontend = Frontend
   { _frontend_head = do
       el "title" $ text "Pλay At Home"
       elAttr "link" ("href" =: static @"main.css" <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
-  , _frontend_body = app
+  , _frontend_body = do
+      auth0Url <- T.decodeUtf8 . fromMaybe "frontend/auth0" <$> getConfig "frontend/auth0"
+      app
+      elAttr "script" ("src" =: auth0Url) blank
   }

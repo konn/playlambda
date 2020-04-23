@@ -11,8 +11,10 @@ import Control.Category
 import Data.Functor.Identity
 import Data.Text             (Text)
 
-import Obelisk.Route
-import Obelisk.Route.TH
+import qualified Control.Category as Cat
+import           Data.Map         (Map)
+import           Obelisk.Route
+import           Obelisk.Route.TH
 
 data BackendRoute :: * -> * where
   -- | Used to handle unparseable routes.
@@ -20,7 +22,7 @@ data BackendRoute :: * -> * where
   BackendRoute_Room    :: BackendRoute ()
 
 data FrontendRoute :: * -> * where
-  FrontendRoute_Main :: FrontendRoute ()
+  FrontendRoute_Main :: FrontendRoute (Map Text (Maybe Text))
 
 fullRouteEncoder
   :: Encoder (Either Text) Identity (R (FullRoute BackendRoute FrontendRoute)) PageName
@@ -31,7 +33,7 @@ fullRouteEncoder = mkFullRouteEncoder
       BackendRoute_Room -> PathSegment "room" $ unitEncoder mempty
   )
   (\case
-      FrontendRoute_Main -> PathEnd $ unitEncoder mempty)
+      FrontendRoute_Main -> PathEnd Cat.id)
 
 concat <$> mapM deriveRouteComponent
   [ ''BackendRoute

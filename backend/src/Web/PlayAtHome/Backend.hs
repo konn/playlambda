@@ -36,37 +36,40 @@ send conn = WS.sendBinaryData conn . encode
 procInitialCmd
   :: TVar ServerState
   -> WS.Connection -> InitCmd -> IO ()
-procInitialCmd tState conn (LogIn uid passwd) = do
+procInitialCmd tState conn (LogIn uid) = do
   now <- getCurrentTime
   ServerState{..} <- readTVarIO tState
-  case HM.lookup uid serverUserPasses of
-    Just hsh
-      | isValidPassword hsh passwd -> do
-        send conn $ LogInSuccess now uid
-        startSession tState conn uid
-    _ -> do
-      send conn $ LogInFailed now uid
-      procInitialCmd tState conn
-        =<< untilJust (decode <$> WS.receiveData conn)
-procInitialCmd tState conn (CreateUser uid passwd) = do
-  now <- getCurrentTime
-  phash <- hashPassword passwd 12
-  est <- atomically $ do
-    ServerState{..} <- readTVar tState
-    if uid `HM.member` serverUserPasses
-      then pure $ Left $ UserAlreadyExists now uid
-      else do
-        modifyTVar' tState $ \st ->
-          st & serverUserPassesL %~ HM.insert uid phash
-        pure $ Right $ LogInSuccess now uid
-  case est of
-    Right msg -> do
-      send conn msg
-      startSession tState conn uid
-    Left err -> do
-      send conn err
-      procInitialCmd tState conn
-        =<< untilJust (decode <$> WS.receiveData conn)
+  send conn $ LogInFailed now ""
+  procInitialCmd tState conn
+         =<< untilJust (decode <$> WS.receiveData conn)
+  -- case HM.lookup uid serverUserPasses of
+  --   Just hsh
+  --     | isValidPassword hsh passwd -> do
+  --       send conn $ LogInSuccess now uid
+  --       startSession tState conn uid
+  --   _ -> do
+  --     send conn $ LogInFailed now uid
+  --     procInitialCmd tState conn
+  --       =<< untilJust (decode <$> WS.receiveData conn)
+-- procInitialCmd tState conn (CreateUser uid passwd) = do
+--   now <- getCurrentTime
+--   phash <- hashPassword passwd 12
+--   est <- atomically $ do
+--     ServerState{..} <- readTVar tState
+--     if uid `HM.member` serverUserPasses
+--       then pure $ Left $ UserAlreadyExists now uid
+--       else do
+--         modifyTVar' tState $ \st ->
+--           st & serverUserPassesL %~ HM.insert uid phash
+--         pure $ Right $ LogInSuccess now uid
+--   case est of
+--     Right msg -> do
+--       send conn msg
+--       startSession tState conn uid
+--     Left err -> do
+--       send conn err
+--       procInitialCmd tState conn
+--         =<< untilJust (decode <$> WS.receiveData conn)
 
 startSession
   :: TVar ServerState

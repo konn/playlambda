@@ -10,7 +10,7 @@ module Web.PlayAtHome.Types
   , isValidPassword, hashPassword
   , Password(..), UserId(..), RoomId(..)
   , Dice(..), Card(..), Deck(..)
-  , PassHash(..), Auth0(..)
+  , PassHash(..), Auth0Config(..)
   , RoomInfo(..), roomMembersL, roomNameL, roomIdL
   ) where
 import           Control.Lens
@@ -79,15 +79,12 @@ makeLensesWith
   (lensRules &  lensField .~ mappingNamer (pure . (++ "L")))
   ''RoomInfo
 
-data InitCmd
+type Token = Text
+
+newtype InitCmd
   = LogIn
-    { initUid      :: !UserId
-    , initPassword :: !Password
+    { jwtToken :: Token
     }
-  | CreateUser
-      { initUid      :: !UserId
-      , initPassword :: !Password
-      }
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
@@ -139,9 +136,19 @@ newtype Card  = Card { getCard :: Text }
 newtype Deck  = Deck { getDeck :: Vector Card }
   deriving (Read, Show, Eq, Ord, Generic)
 
-data Auth0 =
-  Auth0 { domain   :: Text
-        , clientId :: Text
-        }
+data Auth0Config =
+  Auth0Config
+    { domain   :: Text
+    , clientId :: Text
+    }
     deriving (Read, Show, Eq, Ord, Generic)
-    deriving anyclass (ToJSON, FromJSON)
+
+auth0Opts :: Options
+auth0Opts = defaultOptions
+  { fieldLabelModifier = camelTo2 '_' }
+
+instance ToJSON Auth0Config where
+  toJSON = genericToJSON auth0Opts
+
+instance FromJSON Auth0Config where
+  parseJSON = genericParseJSON auth0Opts

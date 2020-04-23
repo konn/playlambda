@@ -26,6 +26,8 @@ library
                 , jsaddle
                 , lens
                 , time
+                , network-uri
+                , dependent-sum
                 , obelisk-executable-config-lookup
                 , obelisk-frontend
                 , obelisk-generated-static
