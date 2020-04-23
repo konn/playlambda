@@ -10,7 +10,7 @@ module Web.PlayAtHome.Types
   , isValidPassword, hashPassword
   , Password(..), UserId(..), RoomId(..)
   , Dice(..), Card(..), Deck(..)
-  , PassHash(..)
+  , PassHash(..), Auth0(..)
   , RoomInfo(..), roomMembersL, roomNameL, roomIdL
   ) where
 import           Control.Lens
@@ -138,3 +138,10 @@ newtype Card  = Card { getCard :: Text }
 
 newtype Deck  = Deck { getDeck :: Vector Card }
   deriving (Read, Show, Eq, Ord, Generic)
+
+data Auth0 =
+  Auth0 { domain   :: Text
+        , clientId :: Text
+        }
+    deriving (Read, Show, Eq, Ord, Generic)
+    deriving anyclass (ToJSON, FromJSON)
