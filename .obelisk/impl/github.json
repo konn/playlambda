@@ -1,8 +1,8 @@
 {
-  "owner": "obsidiansystems",
+  "owner": "konn",
   "repo": "obelisk",
-  "branch": "master",
+  "branch": "gc-workaround",
   "private": false,
-  "rev": "d9df151ed175be4f2dff721676e412a88a0596c1",
-  "sha256": "1wm2q4blqga6appp193idkapnqsan7qnkz29kylqag1y11fk4rrj"
+  "rev": "a66400ab08cfb5d681bb99d4e24de8520842ce85",
+  "sha256": "00idgdvnfckm7d6vr97as5swb37cvjiq48ks4xi039vh0cpi0xsj"
 }
