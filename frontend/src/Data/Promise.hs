@@ -1,4 +1,3 @@
-{-# LANGUAGE ScopedTypeVariables, TypeApplications #-}
 module Data.Promise where
 import Control.Concurrent.MVar
 import Control.Lens
@@ -25,3 +24,15 @@ await jsv = do
     liftIO $ putMVar slot e
     )
   fmap fromJust . fromJSVal =<< liftIO (takeMVar slot)
+
+awaitMaybe :: (FromJSVal a) => Promise a -> JSM (Maybe a)
+awaitMaybe jsv = do
+  slot <- liftIO newEmptyMVar
+  void $ jsv ^. js2 "then"
+    (fun $ \_ _ [e] ->
+      liftIO $ putMVar slot (Just e)
+    )
+    (fun $ \_ _ _ ->
+      liftIO $ putMVar slot Nothing
+    )
+  mapM fromJSValUnchecked =<< liftIO (takeMVar slot)
