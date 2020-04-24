@@ -32,6 +32,7 @@ library
   build-depends:      base >=4.12.0.0
                     , common
                     , jose
+                    , lens-aeson
                     , websockets
                     , time
                     , aeson
