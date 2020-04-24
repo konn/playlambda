@@ -9,13 +9,6 @@ import           RIO                 hiding (lens)
 
 import Web.PlayAtHome.Types
 
-data User =
-  User
-    { userPassword :: Password
-    , userConn     :: WS.Connection
-    }
-  deriving (Generic)
-
 initServerState :: ServerState
 initServerState =
   ServerState mempty mempty mempty mempty
@@ -25,6 +18,7 @@ data ServerEnv =
     { auth0Config :: Auth0Config
     , jwkUrl      :: String
     , logFunction :: LogFunc
+    , serverState :: TVar ServerState
     }
 
 instance HasLogFunc ServerEnv where
@@ -34,8 +28,8 @@ instance HasLogFunc ServerEnv where
 --   but nix won't allow me to do so...
 data ServerState =
   ServerState
-    { serverUserPasses
-      :: HashMap UserId PassHash
+    { serverUsers
+      :: HashMap UserId UserInfo
     , serverUserConns
       :: HashMap UserId WS.Connection
     , serverRooms
@@ -52,7 +46,6 @@ makeLensesWith
 makeLensesWith
   (lensRules & lensField .~ mappingNamer (pure . (++ "L")) )
   ''ServerEnv
-
 
 newtype AuthError = InvalidAccessToken Token
   deriving (Typeable, Show)

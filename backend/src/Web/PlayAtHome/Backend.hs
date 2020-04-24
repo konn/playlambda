@@ -10,8 +10,8 @@ import           Data.Aeson
 import           Data.Aeson.Lens
 import           Data.Dependent.Sum           (DSum (..))
 import qualified Data.HashMap.Strict          as HM
+import qualified Data.Map.Strict              as M
 import           Data.Maybe                   (fromJust)
-import qualified Data.Set                     as S
 import qualified Data.Text                    as T
 import qualified Data.Text.Encoding           as T
 import qualified Data.UUID.V4                 as UUID
@@ -43,34 +43,42 @@ send :: (MonadIO m, ToJSON d) => WS.Connection -> d -> m ()
 send conn = liftIO . WS.sendBinaryData conn . encode
 
 validateToken
-  :: (MonadThrow m, MonadIO m, MonadReader ServerEnv m) => Token -> m UserId
+  :: (MonadThrow m, MonadIO m, MonadReader ServerEnv m) => Token -> m UserInfo
 validateToken tok = do
   Auth0Config{..} <- view auth0ConfigL
-  case JWT.decodeCompact @_ @JWTError $ LBS.fromStrict $ T.encodeUtf8 tok of
-    Right jwt | Just aud <- audience -> do
-      url <- view jwkUrlL
-      jwks <- liftIO $ fmap (view responseBody) . asJSON @_ @JWKSet
-          =<< get url
-      now <- getCurrentTime
-      let chk = (== fromString (T.unpack aud))
-          validIssuer = (== fromString (T.unpack ("https://" <> domain <> "/")))
-          ecSet :: Either JWTError ClaimsSet
-          ecSet = flip runReaderT now $
-            verifyClaims (defaultJWTValidationSettings chk) jwks jwt
-      case ecSet of
-        Right cset
-          | Just uid <- cset ^. claimSub
-          , Just iss <- cset ^. claimIss
-          , validIssuer iss  ->
-              pure $ UserId $ uid ^.string
-        _ -> throwM $ InvalidAccessToken tok
-    _ -> do
-      let wopts = defaults & auth ?~ oauth2Bearer (T.encodeUtf8 tok)
-      bdy <- liftIO $ fmap (view responseBody) . asJSON @_ @Value
-        =<< getWith wopts (T.unpack $ "http://" <> domain <> "/userinfo")
-      case bdy ^? key "sub" . _JSON of
-        Just uid -> pure uid
-        Nothing  -> throwM $ InvalidAccessToken tok
+  let eResp = JWT.decodeCompact @_ @JWTError
+          $ LBS.fromStrict $ T.encodeUtf8 tok
+  euid <- forM eResp $ \ jwt -> do
+    url <- view jwkUrlL
+    jwks <- liftIO $ fmap (view responseBody) . asJSON @_ @JWKSet
+        =<< get url
+    now <- getCurrentTime
+    let chk = maybe (const False) ((==) . fromString . T.unpack) audience
+        validIssuer = (== fromString (T.unpack ("https://" <> domain <> "/")))
+        ecSet :: Either JWTError ClaimsSet
+        ecSet = flip runReaderT now $
+          verifyClaims (defaultJWTValidationSettings chk) jwks jwt
+    case ecSet of
+      Right cset
+        | Just uid <- cset ^. claimSub
+        , Just iss <- cset ^. claimIss
+        , validIssuer iss  ->
+            pure $ UserId $ uid ^.string
+      _ -> throwM $ InvalidAccessToken tok
+  let wopts = defaults & auth ?~ oauth2Bearer (T.encodeUtf8 tok)
+  bdy <- liftIO $ fmap (view responseBody) . asJSON @_ @Value
+    =<< getWith wopts (T.unpack $ "http://" <> domain <> "/userinfo")
+  let pair =
+        (,) <$> (either (const Nothing) Just euid <|> bdy ^? key "sub" . _JSON)
+            <*> bdy ^? key "name". _JSON
+  case pair of
+    Just (userId, userName) ->
+      let userNickname = fromMaybe userName
+            $ bdy ^? key "nickname" . _JSON
+            <|> bdy ^? key "preferred_username" ._JSON
+          userPicture = bdy ^? key "picture" ._JSON
+      in pure UserInfo{..}
+    Nothing          -> throwM $ InvalidAccessToken tok
 
 procInitialCmd
   :: (MonadUnliftIO m, MonadThrow m, MonadReader ServerEnv m)
@@ -85,22 +93,23 @@ procInitialCmd tState conn (LogIn tok) = do
       send conn $ LogInFailed now $ tshow err
       procInitialCmd tState conn
         =<< receive conn
-    Right uid -> do
-      send conn $ LogInSuccess now uid
-      startSession tState conn uid
+    Right uinfo -> do
+      send conn $ LogInSuccess now uinfo
+      startSession tState conn uinfo
 
 startSession
   :: forall m. MonadUnliftIO m
   => TVar ServerState
   -> WS.Connection
-  -> UserId
+  -> UserInfo
   -> m ()
-startSession tsess conn uid = do
+startSession tsess conn uinfo = do
   atomically $
     modifyTVar' tsess $
-      serverUserConnsL %~ HM.insert uid conn
-  mainLoop `finally` unregisterUser tsess uid conn
+      serverUserConnsL %~ HM.insert (uinfo ^. userIdL) conn
+  mainLoop `finally` unregisterUser tsess uinfo conn
   where
+    uid = uinfo ^. userIdL
     mainLoop :: MonadIO m => m ()
     mainLoop = forever $ do
       src <- receiveRaw conn
@@ -118,7 +127,7 @@ startSession tsess conn uid = do
                 -> do
                   let rinfo = (serverRooms HM.! rid)
                             & roomMembersL
-                            %~ S.insert uid
+                            %~ M.insert uid uinfo
                   writeTVar tsess $
                     st & serverRoomsL.at rid ?~ rinfo
                   pure $ Right rinfo
@@ -127,19 +136,20 @@ startSession tsess conn uid = do
             Left msg -> send conn msg
             Right rinfo -> do
               send conn $ YouJoinedRoom now rid rinfo
-              forM_ (roomMembers rinfo) $ \uid' ->
-                when (uid /= uid') $ do
+              forM_ (roomMembers rinfo) $ \uinfo' ->
+                let uid' = uinfo' ^. userIdL
+                in when (uid /= uid') $ do
                 conns <- serverUserConns
                   <$> readTVarIO tsess
                 forM_ (HM.lookup uid' conns) $ \conn' ->
-                  send conn' $ JoinedRoom now rid uid
+                  send conn' $ JoinedRoom now rid uinfo
 
         Right (CreateRoom title pwd) -> do
           rid <- RoomId <$> liftIO UUID.nextRandom
           hsh <- liftIO $ hashPassword pwd 12
           let rinfo = RoomInfo
                 { roomName = title
-                , roomMembers = S.singleton uid
+                , roomMembers = M.singleton uid uinfo
                 , roomId = rid
                 }
           atomically $ modifyTVar' tsess $ \st ->
@@ -149,7 +159,7 @@ startSession tsess conn uid = do
           send conn $
             RoomCreated now rid rinfo
           send conn $
-            JoinedRoom now rid uid
+            JoinedRoom now rid uinfo
 
         Right (DiceRoll rid dice) -> do
           now <- getCurrentTime
@@ -158,25 +168,27 @@ startSession tsess conn uid = do
           case mans of
             Nothing -> send conn $ RoomNotFound now rid
             Just RoomInfo{..}
-              | uid `S.member` roomMembers
-              -> forM_ roomMembers $ \uid' -> do
+              | uid `M.member` roomMembers
+              -> forM_ roomMembers $ \uinfo' -> do
+                let uid' = uinfo' ^. userIdL
                 conns <- serverUserConns
                   <$> readTVarIO tsess
                 forM_ (HM.lookup uid' conns) $ \c ->
-                  send c $ DiceRolled now rid uid dice
+                  send c $ DiceRolled now rid uinfo dice
               | otherwise -> send conn
                   $ NotRoomMember now rid uid
 
 unregisterUser
   :: MonadUnliftIO m
-  => TVar ServerState -> UserId -> WS.Connection -> m ()
-unregisterUser tses uid conn = do
+  => TVar ServerState -> UserInfo -> WS.Connection -> m ()
+unregisterUser tses uinfo conn = do
+  let uid = uinfo ^. userIdL
   _rooms <- atomically $ do
     st@ServerState{..} <- readTVar tses
     writeTVar tses $
       st  & serverUserConnsL %~ HM.delete uid
-          & serverRoomsL %~ HM.map (roomMembersL %~ S.delete uid)
-    pure $ HM.filter (S.member uid . roomMembers)
+          & serverRoomsL %~ HM.map (roomMembersL %~ M.delete uid)
+    pure $ HM.filter (M.member uid . roomMembers)
         $ st ^. serverRoomsL
   -- TODO: Send @MemberLeft@ commands to remaining members
   now <- getCurrentTime
@@ -190,8 +202,8 @@ backend = Backend
       let jwksPath = T.unpack $ "https://" <> domain <> "/.well-known/jwks.json"
       opts <- logOptionsHandle stdout True
       withLogFunc opts $ \logFun -> do
-        let env = ServerEnv conf jwksPath logFun
         state <- newTVarIO initServerState
+        let env = ServerEnv conf jwksPath logFun state
         serve $ \case
           BackendRoute_Missing :=> Identity () -> return ()
           BackendRoute_Room :=> Identity () ->

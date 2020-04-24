@@ -8,7 +8,7 @@ module Web.PlayAtHome.Types
     _RoomNotFound, _NotRoomMember, _JoinFailed,
     _LogInFailed, _LogInSuccess, _Welcome,
     reRoomId,
-    InitCmd(..), InitEvent(..),
+    InitCmd(..), InitEvent(..), UserInfo(..),
     isValidPassword, hashPassword,
     Password(..), UserId(..), RoomId(..),
     RoomEvent(..),
@@ -16,13 +16,17 @@ module Web.PlayAtHome.Types
     PassHash(..), Auth0Config(..), Token,
     domainL, clientIdL, audienceL,
     RoomInfo(..), roomMembersL, roomNameL, roomIdL,
+    userNicknameL,
+    userNameL,
+    userIdL,
+    userPictureL
   ) where
 import           Control.Lens
 import           Crypto.PasswordStore
 import           Data.Aeson
 import           Data.ByteString       (ByteString)
 import           Data.Hashable
-import qualified Data.Set              as Set
+import qualified Data.Map.Strict       as M
 import           Data.String
 import           Data.Text             (Text)
 import           Data.Text.Encoding    (encodeUtf8)
@@ -35,6 +39,16 @@ import           GHC.Generics
 newtype Password = Password { getPassword :: Text }
   deriving (Read, Show, Eq, Ord)
   deriving newtype (Hashable, IsString, FromJSON, ToJSON)
+
+data UserInfo =
+  UserInfo
+    { userNickname :: !Text
+    , userName     :: !Text
+    , userId       :: !UserId
+    , userPicture  :: !(Maybe Text)
+    }
+    deriving (Read, Show, Eq, Ord, Generic)
+    deriving anyclass (ToJSON, FromJSON)
 
 isValidPassword :: PassHash -> Password -> Bool
 isValidPassword (PassHash hsh) (Password pw) =
@@ -50,7 +64,7 @@ newtype PassHash = PassHash { runPassHash :: ByteString }
 
 newtype UserId = UserId { runUserId :: Text }
   deriving (Read, Show, Eq, Ord)
-  deriving newtype (Hashable, IsString, FromJSON, ToJSON)
+  deriving newtype (Hashable, IsString, FromJSON, ToJSON, ToJSONKey, FromJSONKey)
 
 newtype RoomId = RoomId { getRoomId :: UUID }
   deriving (Read, Show, Eq, Ord)
@@ -73,7 +87,7 @@ data Dice =
 
 data RoomInfo = RoomInfo
   { roomName    :: !Text
-  , roomMembers :: Set.Set UserId
+  , roomMembers :: M.Map UserId UserInfo
   , roomId      :: !RoomId
   }
   deriving (Read, Show, Eq, Ord, Generic)
@@ -101,7 +115,7 @@ data PlayCmd
 
 data InitEvent
   = Welcome
-  | LogInSuccess !UTCTime !UserId
+  | LogInSuccess !UTCTime !UserInfo
   | LogInFailed !UTCTime !Text
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
@@ -116,10 +130,10 @@ data PlayEvent
     deriving anyclass (ToJSON, FromJSON)
 
 data RoomEvent
-  = JoinedRoom !UTCTime !RoomId !UserId
+  = JoinedRoom !UTCTime !RoomId !UserInfo
   | YouJoinedRoom !UTCTime !RoomId !RoomInfo
-  | DiceRolled !UTCTime !RoomId !UserId !Dice
-  | MemberLeft !UTCTime !UserId !RoomId
+  | DiceRolled !UTCTime !RoomId !UserInfo !Dice
+  | MemberLeft !UTCTime !UserInfo !RoomId
   | RoomCreated !UTCTime !RoomId !RoomInfo
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
@@ -172,3 +186,8 @@ instance ToJSON Auth0Config where
 
 instance FromJSON Auth0Config where
   parseJSON = genericParseJSON auth0Opts
+
+
+makeLensesWith
+  (lensRules &  lensField .~ mappingNamer (pure . (++ "L")))
+  ''UserInfo

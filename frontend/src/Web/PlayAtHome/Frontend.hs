@@ -11,13 +11,15 @@ import Web.PlayAtHome.Types
 import           Control.Arrow               ((>>>))
 import           Control.Lens                hiding ((.=))
 import           Control.Lens.Extras         (is)
-import           Control.Monad               (guard, join, void, when)
+import           Control.Monad               (join, void, when)
 import           Control.Monad.Fix
 import           Control.Monad.IO.Class
 import           Data.Aeson                  (object, (.=))
 import qualified Data.Aeson                  as Aeson
 import           Data.ByteString.Lazy        (fromStrict)
 import           Data.Dependent.Sum
+import qualified Data.Foldable               as F
+import           Data.List                   (sort)
 import           Data.List.NonEmpty          (nonEmpty)
 import           Data.Map.Strict             (Map)
 import qualified Data.Map.Strict             as M
@@ -25,7 +27,6 @@ import           Data.Maybe                  (fromJust, fromMaybe)
 import           Data.Monoid                 ((<>))
 import           Data.Promise
 import           Data.Semialign
-import qualified Data.Set                    as Set
 import           Data.Text                   (Text)
 import qualified Data.Text                   as T
 import qualified Data.Text.Encoding          as T
@@ -153,8 +154,9 @@ buildPageBody _ evResp roomEvt (Authenticated _ tok) = do
     $ widgetHold (do el "div" $ text "Loading..."; pure never)
     $ alignWith
         (\case
-          This (L (LogInSuccess _ uid)) -> do
-            el "div" $ text $ "Logged in as: " <> tshow uid
+          This (L (LogInSuccess _ uinfo)) -> do
+            el "div" $ text $ "ようこそ "
+              <> (uinfo ^. userNicknameL) <> " さんよ"
             joinRoomWidget playResps
           This (L (LogInFailed _ err)) -> do
             el "div" $ text $ "LogIn Failed!: " <> err
@@ -203,8 +205,8 @@ roomWidget evt0 rinfo = el "div" $ do
   let evt = ffilter ((== Just (roomId rinfo)) . reRoomId) evt0
   mems <- foldDyn
     (\case
-      JoinedRoom _ _ uid -> Set.insert uid
-      MemberLeft _ uid _ -> Set.delete uid
+      JoinedRoom _ _ uinfo -> M.insert (uinfo ^. userIdL) uinfo
+      MemberLeft _ uinfo _ -> M.delete (uinfo ^. userIdL)
       _ -> id
     )
     (roomMembers rinfo) evt
@@ -216,8 +218,8 @@ roomWidget evt0 rinfo = el "div" $ do
   el "div" $ text $ "部屋ID: " <> toText (getRoomId $ roomId rinfo)
   void $ elAttr "div" ("id" =: "members") $ do
     el "h3" $ text "Memebrs"
-    el "ul" $ simpleList (Set.toList <$> mems) $ \dynUid ->
-      el "li" $ dynText (runUserId <$> dynUid)
+    el "ul" $ simpleList (sort . map userNickname . F.toList <$> mems) $ \dynUName ->
+      el "li" $ dynText dynUName
   dice <- diceRoller
   void $ elAttr "div" ("id" =: "log") $ do
     el "h3" $ text "ログ"
@@ -250,19 +252,19 @@ data Msg
   deriving (Read, Show, Eq, Ord)
 
 renderLog :: RoomEvent -> Msg
-renderLog (JoinedRoom time _ uid) = Info time $
-  runUserId uid <> " さんが入室しました"
+renderLog (JoinedRoom time _ uinfo) = Info time $
+  (uinfo ^. userNicknameL) <> " さんが入室しました"
 renderLog (YouJoinedRoom time _ rinfo) =
   Info time $
   "あなたが部屋「" <> roomName rinfo
   <> "」に入室しました"
 renderLog (DiceRolled time _ who (Dice me mx)) =
   Info time $
-      runUserId who <> "さんが【"
+    (who ^. userNicknameL) <> "さんが【"
   <> tshow mx <> "面】ダイスを振り【"
   <> tshow me <>"】を出しました"
 renderLog (MemberLeft now who _) =
-  Info now $ runUserId who <> "さんが去りました"
+  Info now $ userNickname who <> "さんが去りました"
 renderLog (RoomCreated now _ rinfo) =
   Info now $
     "部屋を作成しました：" <> roomName rinfo
