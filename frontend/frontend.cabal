@@ -45,6 +45,7 @@ library
   exposed-modules:
     Web.PlayAtHome.Frontend
     Web.PlayAtHome.Frontend.Types
+    Data.Promise
   ghc-options: -Wall
 
 executable frontend
