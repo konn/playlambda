@@ -47,6 +47,7 @@ library
                     , servant
                     , servant-server
                     , common
+                    , rio
                     , frontend
                     , obelisk-backend
                     , containers
