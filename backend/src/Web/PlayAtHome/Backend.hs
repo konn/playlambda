@@ -1,90 +1,109 @@
-{-# LANGUAGE GADTs, LambdaCase, OverloadedStrings, RecordWildCards #-}
-{-# LANGUAGE TypeApplications                                      #-}
+{-# LANGUAGE FlexibleContexts, GADTs, LambdaCase, OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards, ScopedTypeVariables, TypeApplications #-}
+{-# OPTIONS_GHC -Wall #-}
 module Web.PlayAtHome.Backend where
-import           Control.Concurrent.STM
-import           Control.Exception
 import           Control.Lens
 import           Control.Monad
-import           Control.Monad.Loops
+import           Crypto.JOSE.JWK
+import           Crypto.JWT                   as JWT
 import           Data.Aeson
+import           Data.Aeson.Lens
 import           Data.Dependent.Sum           (DSum (..))
 import qualified Data.HashMap.Strict          as HM
+import           Data.Maybe                   (fromJust)
 import qualified Data.Set                     as S
-import           Data.Time
+import qualified Data.Text                    as T
+import qualified Data.Text.Encoding           as T
 import qualified Data.UUID.V4                 as UUID
 import qualified Network.WebSockets           as WS
 import           Network.WebSockets.Snap
+import           Network.Wreq
 import           Obelisk.Backend
+import           RIO                          hiding (view, (^.))
+import qualified RIO.ByteString.Lazy          as LBS
+import           RIO.Time
 import           Web.PlayAtHome.Backend.Types
 import           Web.PlayAtHome.Route
 import           Web.PlayAtHome.Types
 
-application :: TVar ServerState -> WS.ServerApp
+application
+  :: TVar ServerState -> WS.PendingConnection -> RIO ServerEnv ()
 application tState pending = do
-  conn <- WS.acceptRequest pending
-  WS.forkPingThread conn 30
+  conn <- liftIO $ WS.acceptRequest pending
+  liftIO $ WS.forkPingThread conn 30
   send conn Welcome
-  src <- WS.receiveData conn
+  src <- receiveRaw conn
   case eitherDecode @InitCmd src of
     Left err -> do
       now <- getCurrentTime
       send conn $ InvalidCommand now $ "Invalid command: " ++ show err
     Right cmd -> procInitialCmd tState conn cmd
 
-send :: ToJSON d => WS.Connection -> d -> IO ()
-send conn = WS.sendBinaryData conn . encode
+send :: (MonadIO m, ToJSON d) => WS.Connection -> d -> m ()
+send conn = liftIO . WS.sendBinaryData conn . encode
+
+validateToken
+  :: (MonadThrow m, MonadIO m, MonadReader ServerEnv m) => Token -> m UserId
+validateToken tok = do
+  Auth0Config{..} <- view auth0ConfigL
+  case JWT.decodeCompact @_ @JWTError $ LBS.fromStrict $ T.encodeUtf8 tok of
+    Right jwt | Just aud <- audience -> do
+      url <- view jwkUrlL
+      jwks <- liftIO $ fmap (view responseBody) . asJSON @_ @JWKSet
+          =<< get url
+      now <- getCurrentTime
+      let chk = (== fromString (T.unpack aud))
+          validIssuer = (== fromString (T.unpack ("https://" <> domain <> "/")))
+          ecSet :: Either JWTError ClaimsSet
+          ecSet = flip runReaderT now $
+            verifyClaims (defaultJWTValidationSettings chk) jwks jwt
+      case ecSet of
+        Right cset
+          | Just uid <- cset ^. claimSub
+          , Just iss <- cset ^. claimIss
+          , validIssuer iss  ->
+              pure $ UserId $ uid ^.string
+        _ -> throwM $ InvalidAccessToken tok
+    _ -> do
+      let wopts = defaults & auth ?~ oauth2Bearer (T.encodeUtf8 tok)
+      bdy <- liftIO $ fmap (view responseBody) . asJSON @_ @Value
+        =<< getWith wopts (T.unpack $ "http://" <> domain <> "/userinfo")
+      case bdy ^? key "sub" . _JSON of
+        Just uid -> pure uid
+        Nothing  -> throwM $ InvalidAccessToken tok
 
 procInitialCmd
-  :: TVar ServerState
-  -> WS.Connection -> InitCmd -> IO ()
+  :: (MonadUnliftIO m, MonadThrow m, MonadReader ServerEnv m)
+  => TVar ServerState
+  -> WS.Connection -> InitCmd -> m ()
 procInitialCmd tState conn (LogIn tok) = do
   now <- getCurrentTime
   ServerState{..} <- readTVarIO tState
-  send conn $ LogInFailed now
-  procInitialCmd tState conn
-    =<< untilJust (decode <$> WS.receiveData conn)
-  -- case HM.lookup uid serverUserPasses of
-  --   Just hsh
-  --     | isValidPassword hsh passwd -> do
-  --       send conn $ LogInSuccess now uid
-  --       startSession tState conn uid
-  --   _ -> do
-  --     send conn $ LogInFailed now uid
-  --     procInitialCmd tState conn
-  --       =<< untilJust (decode <$> WS.receiveData conn)
--- procInitialCmd tState conn (CreateUser uid passwd) = do
---   now <- getCurrentTime
---   phash <- hashPassword passwd 12
---   est <- atomically $ do
---     ServerState{..} <- readTVar tState
---     if uid `HM.member` serverUserPasses
---       then pure $ Left $ UserAlreadyExists now uid
---       else do
---         modifyTVar' tState $ \st ->
---           st & serverUserPassesL %~ HM.insert uid phash
---         pure $ Right $ LogInSuccess now uid
---   case est of
---     Right msg -> do
---       send conn msg
---       startSession tState conn uid
---     Left err -> do
---       send conn err
---       procInitialCmd tState conn
---         =<< untilJust (decode <$> WS.receiveData conn)
+  eresl <- try @_ @AuthError $ validateToken tok
+  case eresl of
+    Left err -> do
+      send conn $ LogInFailed now $ tshow err
+      procInitialCmd tState conn
+        =<< receive conn
+    Right uid -> do
+      send conn $ LogInSuccess now uid
+      startSession tState conn uid
 
 startSession
-  :: TVar ServerState
+  :: forall m. MonadUnliftIO m
+  => TVar ServerState
   -> WS.Connection
   -> UserId
-  -> IO ()
+  -> m ()
 startSession tsess conn uid = do
   atomically $
     modifyTVar' tsess $
       serverUserConnsL %~ HM.insert uid conn
   mainLoop `finally` unregisterUser tsess uid conn
   where
+    mainLoop :: MonadIO m => m ()
     mainLoop = forever $ do
-      src <- WS.receiveData conn
+      src <- receiveRaw conn
       case eitherDecode src of
         Left err -> do
           now <- getCurrentTime
@@ -116,8 +135,8 @@ startSession tsess conn uid = do
                   send conn' $ JoinedRoom now rid uid
 
         Right (CreateRoom title pwd) -> do
-          rid <- RoomId <$> UUID.nextRandom
-          hsh <- hashPassword pwd 12
+          rid <- RoomId <$> liftIO UUID.nextRandom
+          hsh <- liftIO $ hashPassword pwd 12
           let rinfo = RoomInfo
                 { roomName = title
                 , roomMembers = S.singleton uid
@@ -149,7 +168,8 @@ startSession tsess conn uid = do
                   $ NotRoomMember now rid uid
 
 unregisterUser
-  :: TVar ServerState -> UserId -> WS.Connection -> IO ()
+  :: MonadUnliftIO m
+  => TVar ServerState -> UserId -> WS.Connection -> m ()
 unregisterUser tses uid conn = do
   _rooms <- atomically $ do
     st@ServerState{..} <- readTVar tses
@@ -160,15 +180,27 @@ unregisterUser tses uid conn = do
         $ st ^. serverRoomsL
   -- TODO: Send @MemberLeft@ commands to remaining members
   now <- getCurrentTime
-  WS.sendClose conn $ encode $ Bye now
+  liftIO $ WS.sendClose conn $ encode $ Bye now
 
 backend :: Backend BackendRoute FrontendRoute
 backend = Backend
   { _backend_run = \serve -> do
-      state <- newTVarIO initServerState
-      serve $ \case
-        BackendRoute_Missing :=> Identity () -> return ()
-        BackendRoute_Room :=> Identity () ->
-          runWebSocketsSnap (application state)
+      conf@Auth0Config{..} <- either fail pure =<<
+        eitherDecodeFileStrict @Auth0Config "config/common/auth_config.json"
+      let jwksPath = T.unpack $ "https://" <> domain <> "/.well-known/jwks.json"
+      opts <- logOptionsHandle stdout True
+      withLogFunc opts $ \logFun -> do
+        let env = ServerEnv conf jwksPath logFun
+        state <- newTVarIO initServerState
+        serve $ \case
+          BackendRoute_Missing :=> Identity () -> return ()
+          BackendRoute_Room :=> Identity () ->
+            runWebSocketsSnap (runRIO env . application state)
   , _backend_routeEncoder = fullRouteEncoder
   }
+
+receive :: (FromJSON a, MonadIO m) => WS.Connection -> m a
+receive = liftIO . fmap (fromJust . decode) . WS.receiveData
+
+receiveRaw :: (MonadIO m) => WS.Connection -> m LBS.ByteString
+receiveRaw = liftIO . WS.receiveData

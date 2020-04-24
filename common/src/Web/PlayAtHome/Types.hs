@@ -11,6 +11,7 @@ module Web.PlayAtHome.Types
   , Password(..), UserId(..), RoomId(..)
   , Dice(..), Card(..), Deck(..)
   , PassHash(..), Auth0Config(..), Token
+  , domainL, clientIdL, audienceL
   , RoomInfo(..), roomMembersL, roomNameL, roomIdL
   ) where
 import           Control.Lens
@@ -97,8 +98,8 @@ data PlayCmd
 
 data InitEvent
   = Welcome
-  | LogInSuccess !UTCTime
-  | LogInFailed !UTCTime
+  | LogInSuccess !UTCTime !UserId
+  | LogInFailed !UTCTime !Text
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
@@ -140,12 +141,19 @@ data Auth0Config =
   Auth0Config
     { domain   :: Text
     , clientId :: Text
+    , audience :: Maybe Text
     }
     deriving (Read, Show, Eq, Ord, Generic)
 
+makeLensesWith
+  (lensRules & lensField .~ mappingNamer (pure . (++ "L")) )
+  ''Auth0Config
+
 auth0Opts :: Options
 auth0Opts = defaultOptions
-  { fieldLabelModifier = camelTo2 '_' }
+  { fieldLabelModifier = camelTo2 '_'
+  , omitNothingFields = True
+  }
 
 instance ToJSON Auth0Config where
   toJSON = genericToJSON auth0Opts

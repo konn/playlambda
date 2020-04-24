@@ -49,7 +49,7 @@ app ::
   ( DomBuilder t m, MonadFix m,
     PostBuild t m, PerformEvent t m,
     Prerender js t m, HasConfigs m,
-    Reflex t,
+    Reflex t, MonadHold t m,
     MonadIO (Performable m),
     MonadHold t m,
     Routed t (DSum FrontendRoute Identity) m
@@ -90,7 +90,9 @@ app = do
   loginWidget route dynAuth0
 
   rec
-    msgSendEv <- dyn (buildPageBody route resps <$> dynAuth0)
+    msgSendEv <-
+      fmap switchDyn . holdDyn never
+      =<< dyn (buildPageBody route resps <$> dynAuth0)
     let resps = fmapMaybe (Aeson.decode @ClientResp . fromStrict)
             $ switchDyn wsRespEv
 
@@ -122,12 +124,40 @@ app = do
   return ()
 
 buildPageBody
-  :: (MonadFix m, DomBuilder t m, Prerender js t m)
+  :: (MonadFix m,
+      DomBuilder t m,
+      Prerender js t m, MonadHold t m,
+      PerformEvent t m, PostBuild t m,
+      MonadIO (Performable m)
+      )
   => Text
   -> Event t ClientResp
   -> AuthState
-  -> m ClientCmd
-buildPageBody route authSt resps = pure undefined
+  -> m (Event t ClientCmd)
+buildPageBody _ evResp (Authenticated _ tok) = do
+  let isWelcome = L (LogIn tok) <$ ffilter (== L Welcome) evResp
+      playResps = fmapMaybe
+        (either (const Nothing) Just . getOneOf) evResp
+  pcmd <- fmap switchDyn $
+    widgetHold (do el "div" $ text "Now Loading..."; pure never)
+    $ evResp <&> \case
+    L (LogInSuccess now uid) -> do
+      el "div" $ text $ "Logged in as: " <> tshow uid
+      joinRoomWidget playResps
+    L (LogInFailed _ err) -> do
+      el "div" $ text $ "LogIn Failed!: " <> err
+      pure never
+    R (YouJoinedRoom _ _ rinfo) ->
+      roomWidget playResps rinfo
+    R (RoomCreated _ _ rinfo) ->
+      roomWidget playResps rinfo
+    otr -> do
+      el "div" $ text $ "Evt; " <> tshow otr
+      pure never
+  pure $ leftmost [isWelcome, R <$> pcmd]
+buildPageBody _ _ NoAuthInfo = pure never
+buildPageBody _ _ Unauthenticated{} = pure never
+
 
 diceRoller
   :: (MonadIO (Performable m),
@@ -362,14 +392,14 @@ loginWidget route authSt = el "div" $ do
       text "ログアウト"
     let loginEv = domEvent Click login
         logOutEv = domEvent Click logout
-    prerender (pure ()) $
+    void $prerender (pure ()) $
       void $ performEvent $ tagPromptlyDyn authSt logOutEv <&> \case
       NoAuthInfo -> pure ()
       st -> void $
         liftJSM $ void $ frontendAuth0 st ^. js1 "logout"
         (object ["retunTo" .= route])
 
-  prerender (pure ()) $ void $ performEvent $
+  void $ prerender (pure ()) $ void $ performEvent_ $
     tagPromptlyDyn
     (authSt <&> \case
       Unauthenticated auther -> void $
@@ -379,12 +409,10 @@ loginWidget route authSt = el "div" $ do
       _ -> pure ()
     )
     loginEv
-  pure ()
-
 
 joinRoomWidget ::
   ( DomBuilder t m, MonadFix m,
-    PostBuild t m, PerformEvent t m,
+    PerformEvent t m, PostBuild t m,
     Prerender js t m, MonadHold t m
   )
   => Event t PlayEvent
