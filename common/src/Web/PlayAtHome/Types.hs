@@ -10,7 +10,7 @@ module Web.PlayAtHome.Types
   , isValidPassword, hashPassword
   , Password(..), UserId(..), RoomId(..)
   , Dice(..), Card(..), Deck(..)
-  , PassHash(..), Auth0Config(..)
+  , PassHash(..), Auth0Config(..), Token
   , RoomInfo(..), roomMembersL, roomNameL, roomIdL
   ) where
 import           Control.Lens
@@ -96,9 +96,9 @@ data PlayCmd
     deriving anyclass (ToJSON, FromJSON)
 
 data InitEvent
-  = LogInSuccess !UTCTime !UserId
-  | UserAlreadyExists !UTCTime !UserId
-  | LogInFailed !UTCTime !UserId
+  = Welcome
+  | LogInSuccess !UTCTime
+  | LogInFailed !UTCTime
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
