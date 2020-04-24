@@ -1,2 +1,2 @@
 #!/usr/bin/env sh
-nix-shell --run "haskell-language-server-wrapper $@"
+ob shell --ghc "haskell-language-server-wrapper $@"

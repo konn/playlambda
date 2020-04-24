@@ -11,7 +11,7 @@ import Web.PlayAtHome.Types
 import           Control.Arrow               ((>>>))
 import           Control.Lens                hiding ((.=))
 import           Control.Lens.Extras         (is)
-import           Control.Monad               (join, void, when)
+import           Control.Monad               (guard, join, void, when)
 import           Control.Monad.Fix
 import           Control.Monad.IO.Class
 import           Data.Aeson                  (object, (.=))
@@ -24,10 +24,12 @@ import qualified Data.Map.Strict             as M
 import           Data.Maybe                  (fromJust, fromMaybe)
 import           Data.Monoid                 ((<>))
 import           Data.Promise
+import           Data.Semialign
 import qualified Data.Set                    as Set
 import           Data.Text                   (Text)
 import qualified Data.Text                   as T
 import qualified Data.Text.Encoding          as T
+import           Data.These
 import           Data.Time
 import           Data.UUID                   as UUID
 import           JSDOM                       (currentWindowUnchecked)
@@ -91,9 +93,11 @@ app = do
 
   rec
     msgSendEv <-
-      fmap switchDyn . holdDyn never
-      =<< dyn (buildPageBody route resps <$> dynAuth0)
-    let resps = fmapMaybe (Aeson.decode @ClientResp . fromStrict)
+      switchHold never
+      =<< dyn (buildPageBody route resps roomEv <$> dynAuth0)
+    let roomEv = fmapMaybe (Aeson.decode @RoomEvent . fromStrict) $
+          switchDyn wsRespEv
+        resps = fmapMaybe (Aeson.decode @ClientResp . fromStrict)
             $ switchDyn wsRespEv
 
     wsRespEv <- prerender (return never) $
@@ -132,31 +136,38 @@ buildPageBody
       )
   => Text
   -> Event t ClientResp
+  -> Event t RoomEvent
   -> AuthState
   -> m (Event t ClientCmd)
-buildPageBody _ evResp (Authenticated _ tok) = do
+buildPageBody _ evResp roomEvt (Authenticated _ tok) = do
   let isWelcome = L (LogIn tok) <$ ffilter (== L Welcome) evResp
-      playResps = fmapMaybe
-        (either (const Nothing) Just . getOneOf) evResp
-  pcmd <- fmap switchDyn $
-    widgetHold (do el "div" $ text "Now Loading..."; pure never)
-    $ evResp <&> \case
-    L (LogInSuccess now uid) -> do
-      el "div" $ text $ "Logged in as: " <> tshow uid
-      joinRoomWidget playResps
-    L (LogInFailed _ err) -> do
-      el "div" $ text $ "LogIn Failed!: " <> err
-      pure never
-    R (YouJoinedRoom _ _ rinfo) ->
-      roomWidget playResps rinfo
-    R (RoomCreated _ _ rinfo) ->
-      roomWidget playResps rinfo
-    otr -> do
-      el "div" $ text $ "Evt; " <> tshow otr
-      pure never
-  pure $ leftmost [isWelcome, R <$> pcmd]
-buildPageBody _ _ NoAuthInfo = pure never
-buildPageBody _ _ Unauthenticated{} = pure never
+      playResps = filterRight (getOneOf <$> evResp)
+      rinfoEv = fmapMaybe
+          (\case
+            YouJoinedRoom _ _ rinfo -> Just rinfo
+            RoomCreated _ _ rinfo -> Just rinfo
+            _ -> Nothing
+          )
+        roomEvt
+  cmds <- fmap switchDyn
+    $ widgetHold (do el "div" $ text "Loading..."; pure never)
+    $ alignWith
+        (\case
+          This (L (LogInSuccess _ uid)) -> do
+            el "div" $ text $ "Logged in as: " <> tshow uid
+            joinRoomWidget playResps
+          This (L (LogInFailed _ err)) -> do
+            el "div" $ text $ "LogIn Failed!: " <> err
+            pure never
+          This _ -> pure never
+          These _ rinfo -> roomWidget roomEvt rinfo
+          That rinfo -> roomWidget roomEvt rinfo
+        )
+        evResp
+        rinfoEv
+  pure $ leftmost [isWelcome, R <$> cmds]
+buildPageBody _ _ _ NoAuthInfo = pure never
+buildPageBody _ _ _ Unauthenticated{} = pure never
 
 
 diceRoller
@@ -185,11 +196,11 @@ roomWidget ::
     PostBuild t m, MonadIO (Performable m),
     PerformEvent t m
   )
-  => Event t PlayEvent
+  => Event t RoomEvent
   -> RoomInfo
   -> m (Event t PlayCmd)
 roomWidget evt0 rinfo = el "div" $ do
-  let evt = ffilter ((== Just (roomId rinfo)) . peRoomId) evt0
+  let evt = ffilter ((== Just (roomId rinfo)) . reRoomId) evt0
   mems <- foldDyn
     (\case
       JoinedRoom _ _ uid -> Set.insert uid
@@ -238,7 +249,7 @@ data Msg
           }
   deriving (Read, Show, Eq, Ord)
 
-renderLog :: PlayEvent -> Msg
+renderLog :: RoomEvent -> Msg
 renderLog (JoinedRoom time _ uid) = Info time $
   runUserId uid <> " さんが入室しました"
 renderLog (YouJoinedRoom time _ rinfo) =
@@ -250,22 +261,11 @@ renderLog (DiceRolled time _ who (Dice me mx)) =
       runUserId who <> "さんが【"
   <> tshow mx <> "面】ダイスを振り【"
   <> tshow me <>"】を出しました"
-renderLog (Bye now) =
-  Info now "さようなら"
-renderLog (InvalidCommand now str) = ErrorMsg now $
-  "内部エラーです：" <> T.pack str
 renderLog (MemberLeft now who _) =
   Info now $ runUserId who <> "さんが去りました"
 renderLog (RoomCreated now _ rinfo) =
   Info now $
     "部屋を作成しました：" <> roomName rinfo
-renderLog (RoomNotFound now rid) =
-  ErrorMsg now $
-    "そんな識別子の部屋はありません: " <> tshow (getRoomId rid)
-renderLog (NotRoomMember now _ _) =
-  ErrorMsg now "あなたは部屋のメンバーではありません"
-renderLog (JoinFailed now _) =
-  ErrorMsg now "その部屋には入れません"
 
 tshow :: Show a => a -> T.Text
 tshow = T.pack . show

@@ -5,14 +5,17 @@ module Web.PlayAtHome.Types
   ( PlayCmd(..), PlayEvent(..), peRoomId,
     _JoinedRoom, _YouJoinedRoom, _DiceRolled,
     _MemberLeft, _Bye, _InvalidCommand, _RoomCreated,
-    _RoomNotFound, _NotRoomMember, _JoinFailed
-  , InitCmd(..), InitEvent(..)
-  , isValidPassword, hashPassword
-  , Password(..), UserId(..), RoomId(..)
-  , Dice(..), Card(..), Deck(..)
-  , PassHash(..), Auth0Config(..), Token
-  , domainL, clientIdL, audienceL
-  , RoomInfo(..), roomMembersL, roomNameL, roomIdL
+    _RoomNotFound, _NotRoomMember, _JoinFailed,
+    _LogInFailed, _LogInSuccess, _Welcome,
+    reRoomId,
+    InitCmd(..), InitEvent(..),
+    isValidPassword, hashPassword,
+    Password(..), UserId(..), RoomId(..),
+    RoomEvent(..),
+    Dice(..), Card(..), Deck(..),
+    PassHash(..), Auth0Config(..), Token,
+    domainL, clientIdL, audienceL,
+    RoomInfo(..), roomMembersL, roomNameL, roomIdL,
   ) where
 import           Control.Lens
 import           Crypto.PasswordStore
@@ -104,31 +107,40 @@ data InitEvent
     deriving anyclass (ToJSON, FromJSON)
 
 data PlayEvent
-  = JoinedRoom !UTCTime !RoomId !UserId
-  | YouJoinedRoom !UTCTime !RoomId !RoomInfo
-  | DiceRolled !UTCTime !RoomId !UserId !Dice
-  | MemberLeft !UTCTime !UserId !RoomId
-  | Bye !UTCTime
+  = Bye !UTCTime
   | InvalidCommand !UTCTime String
-  | RoomCreated !UTCTime !RoomId !RoomInfo
   | RoomNotFound !UTCTime !RoomId
   | NotRoomMember !UTCTime !RoomId !UserId
   | JoinFailed !UTCTime !RoomId
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
+data RoomEvent
+  = JoinedRoom !UTCTime !RoomId !UserId
+  | YouJoinedRoom !UTCTime !RoomId !RoomInfo
+  | DiceRolled !UTCTime !RoomId !UserId !Dice
+  | MemberLeft !UTCTime !UserId !RoomId
+  | RoomCreated !UTCTime !RoomId !RoomInfo
+    deriving (Read, Show, Eq, Ord, Generic)
+    deriving anyclass (ToJSON, FromJSON)
+
 peRoomId :: PlayEvent -> Maybe RoomId
-peRoomId (JoinedRoom _ rid _)    = Just rid
-peRoomId (YouJoinedRoom _ rid _) = Just rid
-peRoomId (DiceRolled _ rid _ _)  = Just rid
-peRoomId (MemberLeft _ _ rid)    = Just rid
-peRoomId (RoomCreated _ rid _)   = Just rid
 peRoomId (RoomNotFound _ rid)    = Just rid
 peRoomId (JoinFailed _ rid)      = Just rid
 peRoomId (NotRoomMember _ rid _) = Just rid
 peRoomId _                       = Nothing
 
+reRoomId :: RoomEvent -> Maybe RoomId
+reRoomId (JoinedRoom _ rid _)    = Just rid
+reRoomId (YouJoinedRoom _ rid _) = Just rid
+reRoomId (DiceRolled _ rid _ _)  = Just rid
+reRoomId (MemberLeft _ _ rid)    = Just rid
+reRoomId (RoomCreated _ rid _)   = Just rid
+
+
 makePrisms ''PlayEvent
+makePrisms ''InitEvent
+makePrisms ''RoomEvent
 
 newtype Card  = Card { getCard :: Text }
   deriving (Read, Show, Eq, Ord, Generic)

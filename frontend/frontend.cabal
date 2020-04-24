@@ -42,6 +42,7 @@ library
                 , aeson
                 , bytestring
                 , containers
+                , semialign
   exposed-modules:
     Web.PlayAtHome.Frontend
     Web.PlayAtHome.Frontend.Types
