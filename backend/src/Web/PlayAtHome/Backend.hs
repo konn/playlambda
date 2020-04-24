@@ -23,6 +23,7 @@ application :: TVar ServerState -> WS.ServerApp
 application tState pending = do
   conn <- WS.acceptRequest pending
   WS.forkPingThread conn 30
+  send conn Welcome
   src <- WS.receiveData conn
   case eitherDecode @InitCmd src of
     Left err -> do
@@ -36,12 +37,12 @@ send conn = WS.sendBinaryData conn . encode
 procInitialCmd
   :: TVar ServerState
   -> WS.Connection -> InitCmd -> IO ()
-procInitialCmd tState conn (LogIn uid) = do
+procInitialCmd tState conn (LogIn tok) = do
   now <- getCurrentTime
   ServerState{..} <- readTVarIO tState
-  send conn $ LogInFailed now ""
+  send conn $ LogInFailed now
   procInitialCmd tState conn
-         =<< untilJust (decode <$> WS.receiveData conn)
+    =<< untilJust (decode <$> WS.receiveData conn)
   -- case HM.lookup uid serverUserPasses of
   --   Just hsh
   --     | isValidPassword hsh passwd -> do
