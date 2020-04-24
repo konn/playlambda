@@ -52,6 +52,7 @@ library
                     , containers
                     , monad-loops
                     , obelisk-route
+                    , wreq
   default-language:    Haskell2010
 
 executable backend
