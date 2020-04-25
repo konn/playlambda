@@ -192,10 +192,10 @@ diceRoller
 diceRoller = el "div" $ do
   btn <- constButtonM
           "Roll dice"
-          (liftIO $ randomRIO (1 :: Int, 6))
+          (liftIO $ randomRIO (1 :: Int, 3))
   rand <- holdDyn Nothing (Just <$> btn)
   dynText $ maybe "" ((" " <>) . T.pack . show) <$> rand
-  pure $ (`Dice` 6) <$> btn
+  pure $ (`Dice` 3) <$> btn
 
 constButtonM
   :: (DomBuilder t m, PerformEvent t m)
