@@ -48,7 +48,7 @@ validateToken tok = do
   Auth0Config{..} <- view auth0ConfigL
   let eResp = JWT.decodeCompact @_ @JWTError
           $ LBS.fromStrict $ T.encodeUtf8 tok
-  euid <- forM eResp $ \ jwt -> do
+  euser <- forM eResp $ \ jwt -> do
     url <- view jwkUrlL
     jwks <- liftIO $ fmap (view responseBody) . asJSON @_ @JWKSet
         =<< get url
@@ -60,25 +60,32 @@ validateToken tok = do
           verifyClaims (defaultJWTValidationSettings chk) jwks jwt
     case ecSet of
       Right cset
-        | Just uid <- cset ^. claimSub
+        | Just uid0 <- cset ^. claimSub
         , Just iss <- cset ^. claimIss
-        , validIssuer iss  ->
-            pure $ UserId $ uid ^.string
+        , validIssuer iss  -> do
+            let uid = UserId $ uid0 ^. string
+            muser <- HM.lookup uid . serverUsers
+              <$> (readTVarIO =<< view serverStateL)
+            pure (uid, muser)
       _ -> throwM $ InvalidAccessToken tok
-  let wopts = defaults & auth ?~ oauth2Bearer (T.encodeUtf8 tok)
-  bdy <- liftIO $ fmap (view responseBody) . asJSON @_ @Value
-    =<< getWith wopts (T.unpack $ "http://" <> domain <> "/userinfo")
-  let pair =
-        (,) <$> (either (const Nothing) Just euid <|> bdy ^? key "sub" . _JSON)
-            <*> bdy ^? key "name". _JSON
-  case pair of
-    Just (userId, userName) ->
-      let userNickname = fromMaybe userName
-            $ bdy ^? key "nickname" . _JSON
-            <|> bdy ^? key "preferred_username" ._JSON
-          userPicture = bdy ^? key "picture" ._JSON
-      in pure UserInfo{..}
-    Nothing          -> throwM $ InvalidAccessToken tok
+  case euser of
+    Right (_, Just uinfo) -> pure uinfo
+    _ -> do
+      let euid = fst  <$> euser
+          wopts = defaults & auth ?~ oauth2Bearer (T.encodeUtf8 tok)
+      bdy <- liftIO $ fmap (view responseBody) . asJSON @_ @Value
+        =<< getWith wopts (T.unpack $ "http://" <> domain <> "/userinfo")
+      let pair =
+            (,) <$> (either (const Nothing) Just euid <|> bdy ^? key "sub" . _JSON)
+                <*> bdy ^? key "name". _JSON
+      case pair of
+        Just (userId, userName) ->
+          let userNickname = fromMaybe userName
+                $ bdy ^? key "nickname" . _JSON
+                <|> bdy ^? key "preferred_username" ._JSON
+              userPicture = bdy ^? key "picture" ._JSON
+          in pure UserInfo{..}
+        Nothing          -> throwM $ InvalidAccessToken tok
 
 procInitialCmd
   :: (MonadUnliftIO m, MonadThrow m, MonadReader ServerEnv m)
@@ -107,6 +114,7 @@ startSession tsess conn uinfo = do
   atomically $
     modifyTVar' tsess $
       serverUserConnsL %~ HM.insert (uinfo ^. userIdL) conn
+      >>> serverUsersL %~ HM.insert (uinfo ^. userIdL) uinfo
   mainLoop `finally` unregisterUser tsess uinfo conn
   where
     uid = uinfo ^. userIdL
