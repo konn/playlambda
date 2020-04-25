@@ -12,6 +12,7 @@ import           Data.Dependent.Sum           (DSum (..))
 import qualified Data.HashMap.Strict          as HM
 import qualified Data.Map.Strict              as M
 import           Data.Maybe                   (fromJust)
+import qualified Data.Sequence                as Seq
 import qualified Data.Text                    as T
 import qualified Data.Text.Encoding           as T
 import qualified Data.UUID.V4                 as UUID
@@ -144,6 +145,8 @@ startSession tsess conn uinfo = do
             Left msg -> send conn msg
             Right rinfo -> do
               send conn $ YouJoinedRoom now rid rinfo
+              mapM_ (send conn) $ rinfo ^. roomEventsL
+
               forM_ (roomMembers rinfo) $ \uinfo' ->
                 let uid' = uinfo' ^. userIdL
                 in when (uid /= uid') $ do
@@ -153,17 +156,21 @@ startSession tsess conn uinfo = do
                   send conn' $ JoinedRoom now rid uinfo
 
         Right (CreateRoom title pwd) -> do
+          now <- getCurrentTime
           rid <- RoomId <$> liftIO UUID.nextRandom
           hsh <- liftIO $ hashPassword pwd 12
           let rinfo = RoomInfo
                 { roomName = title
                 , roomMembers = M.singleton uid uinfo
                 , roomId = rid
+                , roomEvents = Seq.fromList
+                    [ RoomCreated now rid rinfo { roomEvents = mempty }
+                    , JoinedRoom now rid uinfo
+                    ]
                 }
           atomically $ modifyTVar' tsess $ \st ->
             st  & serverRoomsL      %~ HM.insert rid rinfo
                 & serverRoomPassesL %~ HM.insert rid hsh
-          now <- getCurrentTime
           send conn $
             RoomCreated now rid rinfo
           send conn $
@@ -179,10 +186,14 @@ startSession tsess conn uinfo = do
               | uid `M.member` roomMembers
               -> forM_ roomMembers $ \uinfo' -> do
                 let uid' = uinfo' ^. userIdL
+                    rolled = DiceRolled now rid uinfo dice
+                atomically $ modifyTVar tsess $
+                  serverRoomsL.at rid %~
+                    fmap (roomEventsL <>~ Seq.singleton rolled)
                 conns <- serverUserConns
                   <$> readTVarIO tsess
                 forM_ (HM.lookup uid' conns) $ \c ->
-                  send c $ DiceRolled now rid uinfo dice
+                  send c rolled
               | otherwise -> send conn
                   $ NotRoomMember now rid uid
 

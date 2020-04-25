@@ -7,7 +7,7 @@ module Web.PlayAtHome.Types
     _MemberLeft, _Bye, _InvalidCommand, _RoomCreated,
     _RoomNotFound, _NotRoomMember, _JoinFailed,
     _LogInFailed, _LogInSuccess, _Welcome,
-    reRoomId,
+    reRoomId, roomEventsL,
     InitCmd(..), InitEvent(..), UserInfo(..),
     isValidPassword, hashPassword,
     Password(..), UserId(..), RoomId(..),
@@ -27,6 +27,7 @@ import           Data.Aeson
 import           Data.ByteString       (ByteString)
 import           Data.Hashable
 import qualified Data.Map.Strict       as M
+import qualified Data.Sequence         as Seq
 import           Data.String
 import           Data.Text             (Text)
 import           Data.Text.Encoding    (encodeUtf8)
@@ -85,9 +86,19 @@ data Dice =
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (Hashable, ToJSON, FromJSON)
 
+data RoomEvent
+  = JoinedRoom !UTCTime !RoomId !UserInfo
+  | YouJoinedRoom !UTCTime !RoomId !RoomInfo
+  | DiceRolled !UTCTime !RoomId !UserInfo !Dice
+  | MemberLeft !UTCTime !UserInfo !RoomId
+  | RoomCreated !UTCTime !RoomId !RoomInfo
+    deriving (Read, Show, Eq, Ord, Generic)
+    deriving anyclass (ToJSON, FromJSON)
+
 data RoomInfo = RoomInfo
   { roomName    :: !Text
   , roomMembers :: M.Map UserId UserInfo
+  , roomEvents  :: Seq.Seq RoomEvent
   , roomId      :: !RoomId
   }
   deriving (Read, Show, Eq, Ord, Generic)
@@ -126,15 +137,6 @@ data PlayEvent
   | RoomNotFound !UTCTime !RoomId
   | NotRoomMember !UTCTime !RoomId !UserId
   | JoinFailed !UTCTime !RoomId
-    deriving (Read, Show, Eq, Ord, Generic)
-    deriving anyclass (ToJSON, FromJSON)
-
-data RoomEvent
-  = JoinedRoom !UTCTime !RoomId !UserInfo
-  | YouJoinedRoom !UTCTime !RoomId !RoomInfo
-  | DiceRolled !UTCTime !RoomId !UserInfo !Dice
-  | MemberLeft !UTCTime !UserInfo !RoomId
-  | RoomCreated !UTCTime !RoomId !RoomInfo
     deriving (Read, Show, Eq, Ord, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
