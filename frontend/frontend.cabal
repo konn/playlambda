@@ -43,6 +43,7 @@ library
                 , bytestring
                 , containers
                 , semialign
+                , these
   exposed-modules:
     Web.PlayAtHome.Frontend
     Web.PlayAtHome.Frontend.Types
