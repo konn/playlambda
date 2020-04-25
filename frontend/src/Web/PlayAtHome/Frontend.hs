@@ -33,10 +33,13 @@ import qualified Data.Text.Encoding          as T
 import           Data.These
 import           Data.Time
 import           Data.UUID                   as UUID
-import           JSDOM                       (currentWindowUnchecked)
+import           JSDOM                       (currentDocumentUnchecked,
+                                              currentWindowUnchecked)
 import           JSDOM.Custom.Window         (getHistory)
+import           JSDOM.Document
 import           JSDOM.Generated.History     (replaceState)
 import           JSDOM.Types                 (JSVal)
+import qualified JSDOM.Types                 as JSDOM
 import           Language.Javascript.JSaddle
 import           Obelisk.Configs
 import           Obelisk.Frontend
@@ -63,6 +66,10 @@ app = do
   let params :: Map Text (Maybe Text)
       params = case r of
         FrontendRoute_Main :=> Identity dic -> dic
+      optRoomId = join $ M.lookup "room_id" params
+      routeWithParams =
+          maybe id
+          (\ident -> (<> ("/?room_id=" <> ident))) optRoomId route
   authConf <- fromMaybe (error "Aeson decoding config failed")
     . Aeson.decode @Auth0Config
     . fromStrict . fromMaybe (error "Reading auth_config failed")
@@ -90,12 +97,12 @@ app = do
               <$> getTokenSilently auth0
         else pure $ Unauthenticated auth0
     holdDyn NoAuthInfo ev
-  loginWidget route dynAuth0
+  loginWidget route routeWithParams dynAuth0
 
   rec
     msgSendEv <-
       switchHold never
-      =<< dyn (buildPageBody route resps roomEv <$> dynAuth0)
+      =<< dyn (buildPageBody route optRoomId resps roomEv <$> dynAuth0)
     let roomEv = fmapMaybe (Aeson.decode @RoomEvent . fromStrict) $
           switchDyn wsRespEv
         resps = fmapMaybe (Aeson.decode @ClientResp . fromStrict)
@@ -136,11 +143,12 @@ buildPageBody
       MonadIO (Performable m)
       )
   => Text
+  -> Maybe Text
   -> Event t ClientResp
   -> Event t RoomEvent
   -> AuthState
   -> m (Event t ClientCmd)
-buildPageBody _ evResp roomEvt (Authenticated _ tok) = do
+buildPageBody route mRoomId evResp roomEvt (Authenticated _ tok) = do
   let isWelcome = L (LogIn tok) <$ ffilter (== L Welcome) evResp
       playResps = filterRight (getOneOf <$> evResp)
       rinfoEv = fmapMaybe
@@ -157,19 +165,22 @@ buildPageBody _ evResp roomEvt (Authenticated _ tok) = do
           This (L (LogInSuccess _ uinfo)) -> do
             el "div" $ text $ "ようこそ "
               <> (uinfo ^. userNicknameL) <> " さんよ"
-            joinRoomWidget playResps
+            joinRoomWidget mRoomId playResps
           This (L (LogInFailed _ err)) -> do
             el "div" $ text $ "LogIn Failed!: " <> err
             pure never
+          This (R (JoinFailed _ _)) ->
+            joinRoomWidget mRoomId playResps
+              <* el "div" (text "部屋に入れませんでした")
           This _ -> pure never
-          These _ rinfo -> roomWidget roomEvt rinfo
-          That rinfo -> roomWidget roomEvt rinfo
+          These _ rinfo -> roomWidget route roomEvt rinfo
+          That rinfo -> roomWidget route roomEvt rinfo
         )
         evResp
         rinfoEv
   pure $ leftmost [isWelcome, R <$> cmds]
-buildPageBody _ _ _ NoAuthInfo = pure never
-buildPageBody _ _ _ Unauthenticated{} = pure never
+buildPageBody _ _ _ _ NoAuthInfo = pure never
+buildPageBody _ _ _ _ Unauthenticated{} = pure never
 
 
 diceRoller
@@ -193,15 +204,23 @@ constButtonM t act = do
   (e, _) <- elAttr' "button" ("type" =: "button") $ text t
   performEvent $ pushAlways (const $ pure act) (domEvent Click e)
 
+copyTextarea :: (MonadJSM m) => JSDOM.Element -> m ()
+copyTextarea ta = liftJSM $ do
+  void $ ta ^. js0 "select"
+  doc <- currentDocumentUnchecked
+  void $ doc ^. js1 "execCommand" "copy"
+
 roomWidget ::
   ( DomBuilder t m, MonadHold t m, MonadFix m,
     PostBuild t m, MonadIO (Performable m),
+    Prerender js t m,
     PerformEvent t m
   )
-  => Event t RoomEvent
+  => Text
+  -> Event t RoomEvent
   -> RoomInfo
   -> m (Event t PlayCmd)
-roomWidget evt0 rinfo = el "div" $ do
+roomWidget route evt0 rinfo = el "div" $ do
   let evt = ffilter ((== Just (roomId rinfo)) . reRoomId) evt0
   mems <- foldDyn
     (\case
@@ -215,7 +234,17 @@ roomWidget evt0 rinfo = el "div" $ do
     []
     evt
   el "h2" $ text $ roomName rinfo
-  el "div" $ text $ "部屋ID: " <> toText (getRoomId $ roomId rinfo)
+  let uuidText = toText (getRoomId $ roomId rinfo)
+      lk = route <> "?room_id=" <> uuidText
+  el "div" $ text $ "部屋ID: " <> uuidText
+  el "div" $ do
+    text "部屋リンク："
+    elAttr "input"
+      ("type" =: "input" <> "value" =: lk <> "readonly" =: "readonly"
+        <> "style" =: "width: 50%"
+      )
+      blank
+
   void $ elAttr "div" ("id" =: "members") $ do
     el "h3" $ text "Memebrs"
     el "ul" $ simpleList (sort . map userNickname . F.toList <$> mems) $ \dynUName ->
@@ -278,6 +307,7 @@ data LoginLikeForm ident evt cmd  =
   , loginLabel      :: Text
   , createLabel     :: Text
   , namePlaceholder :: Text
+  , nameInitId      :: Maybe Text
   , validateName    :: Text -> Either Text ident
   , nameId          :: Text
   , passId          :: Text
@@ -311,6 +341,7 @@ mkLoginLikeForm LoginLikeForm{..} evt = el "div" $ do
           Left _  -> "style" =: Just "background-color: red"
     name <- inputElement
       $ def
+      & inputElementConfig_initialValue .~ fromMaybe "" nameInitId
       & inputElementConfig_elementConfig
       %~ (elementConfig_initialAttributes
           .~ ("placeholder" =: namePlaceholder <>
@@ -353,8 +384,8 @@ mkLoginLikeForm LoginLikeForm{..} evt = el "div" $ do
     curResp <- holdDyn (Right ()) colorOrChange
     elDynAttr "div"
       (curResp <&> \case
-        Right _ -> "style" =: "visibility: hidden"
-        Left _  -> "style" =: "visibility: visible; font-size: small; color: red"
+        Right _ -> "style" =: "display: none"
+        Left _  -> "style" =: "font-size: small; color: red"
       )
       $ dynText $ either id (const "") <$> curResp
 
@@ -375,9 +406,10 @@ loginWidget ::
     MonadJSM (Client m)
   )
   => Text
+  -> Text
   -> Dynamic t AuthState
   -> m ()
-loginWidget route authSt = el "div" $ do
+loginWidget route routeParam authSt = el "div" $ do
   let mkDisable _ NoAuthInfo               = "disabled" =: "disabled"
       mkDisable IsLogin Authenticated{}    = "disabled" =: "disabled"
       mkDisable IsLogout Unauthenticated{} = "disabled" =: "disabled"
@@ -394,7 +426,7 @@ loginWidget route authSt = el "div" $ do
       text "ログアウト"
     let loginEv = domEvent Click login
         logOutEv = domEvent Click logout
-    void $prerender (pure ()) $
+    void $ prerender (pure ()) $
       void $ performEvent $ tagPromptlyDyn authSt logOutEv <&> \case
       NoAuthInfo -> pure ()
       st -> void $
@@ -407,7 +439,7 @@ loginWidget route authSt = el "div" $ do
       Unauthenticated auther -> void $
         liftJSM $
           void $ auther ^. js1 "loginWithRedirect"
-                    (object ["redirect_uri" .= route ])
+                    (object ["redirect_uri" .= routeParam ])
       _ -> pure ()
     )
     loginEv
@@ -417,13 +449,15 @@ joinRoomWidget ::
     PerformEvent t m, PostBuild t m,
     Prerender js t m, MonadHold t m
   )
-  => Event t PlayEvent
+  => Maybe Text
+  -> Event t PlayEvent
   -> m (Event t PlayCmd)
-joinRoomWidget = mkLoginLikeForm LoginLikeForm
+joinRoomWidget mRoomId = mkLoginLikeForm LoginLikeForm
     { loginHeader     = "部屋の作成／入室"
     , loginLabel      = "入室"
     , createLabel     = "作成"
     , namePlaceholder = "部屋ID／部屋名"
+    , nameInitId = mRoomId
     , nameId          = "room-id"
     , passId          = "room-pass"
     , validateName =
